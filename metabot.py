@@ -1,19 +1,14 @@
-# bot.py — Metabull Universe Telegram Bot (Sheets-integrated, logo-step fix + cancel)
-# - Keyword Q&A + suggestions
-# - Footer actions (Services/Prices/Location/Contact/Call)
-# - Bottom menu: Start, Create a Post, Create a Landing Page (₹1200 UPI QR), Service Demos, Join Channel, Follow Us
-# - Create a Post: image + link -> CTA post
-# - Landing Page: fills One AI Solutions template; supports logo URL or uploaded photo (base64 embedded)
-# - Google Sheets CRM logging with tags
-# - FIX: LP logo step no longer hijacks unrelated text; /cancel to exit any flow
+# bot.py — Metabull Universe Telegram Bot (v3.3)
+# - Q&A + suggestions
+# - Footer quick actions
+# - Menu: Start / Create a Post / Create a Landing Page (₹1200 UPI) / Service Demos / Join Channel / Follow Us
+# - DEMOS buttons always work (inside/outside conversations)
+# - Landing Page flow: robust payment + “I’ve paid” -> delivers landing_page.html
+# - Google Sheets logging
+# - Jump-to-menu inside conversations
+# - Windows-safe runner: uses blocking run_polling()/run_webhook() (no asyncio.run)
 
-import os
-import io
-import re
-import json
-import base64
-import datetime
-import logging
+import os, io, re, json, base64, datetime, logging, sys, asyncio
 from textwrap import dedent
 from typing import Dict, List, Tuple
 from urllib.parse import quote
@@ -22,19 +17,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Logging
+# Windows event-loop fix
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("metabull-bot")
 
-# ---- Google Sheets (gspread) ----
+# ------- Google Sheets -------
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ---- Images / QR ----
+# ------- Images / QR -------
 from PIL import Image
 import qrcode
 
-# ---- Telegram ----
+# ------- Telegram -------
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -53,13 +51,16 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
-# ENV / CONFIG
-# =========================
+# ========================= ENV =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHANNEL_URL = os.getenv("COMPANY_CHANNEL_URL", "https://t.me/metabulluniverse")
 UPI_ID = os.getenv("UPI_ID", "you@upi")
 UPI_NAME = os.getenv("UPI_NAME", "Metabull Universe")
+
+# Optional webhook mode (Railway)
+USE_WEBHOOK = os.getenv("USE_WEBHOOK", "false").lower() == "true"
+PORT = int(os.getenv("PORT", "8080"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # e.g. https://<railway-domain>/webhook
 
 SOCIAL = {
     "telegram": os.getenv("SOCIAL_TELEGRAM", CHANNEL_URL),
@@ -74,11 +75,9 @@ SOCIAL = {
     "discord": os.getenv("SOCIAL_DISCORD", "https://discord.gg/xxxxxxx"),
 }
 
-# Google Sheets ENV
-GSHEET_ID = os.getenv("GSHEET_ID", "")  # spreadsheet id
-SERVICE_JSON_RAW = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")  # JSON string
+GSHEET_ID = os.getenv("GSHEET_ID", "")
+SERVICE_JSON_RAW = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
-# Demo links
 VIDEO_DEMOS = [
     "https://drive.google.com/file/d/VIDEO_DEMO_1/view",
     "https://drive.google.com/file/d/VIDEO_DEMO_2/view",
@@ -92,12 +91,9 @@ ADS_LINKS = [
     "https://www.instagram.com/p/AD_DEMO_2/",
 ]
 
-# Pricing
 LP_PRICE = 1200  # INR
 
-# =========================
-# Google Sheets Helper
-# =========================
+# ====================== Sheets =========================
 _sheets_client = None
 _worksheet = None
 
@@ -131,7 +127,7 @@ def _init_sheets():
         except Exception:
             _worksheet = sh.sheet1
         headers = _worksheet.row_values(1)
-        needed = [
+        need = [
             "timestamp",
             "user_id",
             "username",
@@ -141,9 +137,9 @@ def _init_sheets():
             "tags",
             "payload",
         ]
-        if [h.lower() for h in headers] != needed:
-            _worksheet.update([needed])
-        log.info("Google Sheets initialized")
+        if [h.lower() for h in headers] != need:
+            _worksheet.update([need])
+        log.info("Sheets ready")
     except Exception as e:
         log.error("Sheets init error: %s", e)
 
@@ -170,9 +166,7 @@ def crm_log(user, action: str, tags: str = "", payload: Dict = None):
         log.error("Sheets log error: %s", e)
 
 
-# =========================
-# Knowledge Base
-# =========================
+# ======================= KB ===========================
 KB = {
     "company": {
         "name": "Metabull Universe",
@@ -215,87 +209,44 @@ KB = {
         "ads": "Depends on client budget & needs",
         "smm": "₹5000/month (single account, 3 posts/day)",
     },
-    "why_us": "We blend creativity, technology, and marketing with affordable pricing and 5 years of experience. Tailor-made solutions available. We work with Indian & international clients.",
+    "why_us": "We blend creativity, technology, and marketing with affordable pricing and 5 years of experience.",
     "industries": ["Technology", "E-commerce", "Education", "Healthcare", "Startups"],
 }
 
-# =========================
-# Landing Template
-# =========================
+# =================== Landing Template =================
 LANDING_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>{{PAGE_TITLE}}</title>
-    <meta name="description" content="{{META_DESCRIPTION}}" />
-    <meta name="keywords" content="{{META_KEYWORDS}}" />
-    <meta name="author" content="{{BRAND_NAME}}" />
-    <meta name="robots" content="index, follow" />
-    <link rel="canonical" href="{{CANONICAL_URL}}" />
-    <meta property="og:title" content="{{OG_TITLE}}" />
-    <meta property="og:description" content="{{OG_DESCRIPTION}}" />
-    <meta property="og:image" content="{{OG_IMAGE}}" />
-    <meta property="og:url" content="{{OG_URL}}" />
-    <meta property="og:type" content="website" />
-    <link rel="icon" href="{{FAVICON_URL}}" type="image/jpeg" />
-    <link rel="stylesheet"
-      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        theme: { extend: {
-          colors: { primary:"#1d4ed8", secondary:"#15803d", accent:"black", light:"black" },
-          fontFamily: { sans: ['"Segoe UI"','Tahoma','Geneva','Verdana','sans-serif'] },
-          keyframes: {
-            fadeInUp: {"0%": {opacity:"0",transform:"translateY(30px)"},"100%": {opacity:"1",transform:"translateY(0)"}},
-            zoomIn: {"0%": {opacity:"0",transform:"scale(0.8)"},"100%": {opacity:"1",transform:"scale(1)"}},
-            fadeInBody: {from:{opacity:"0"},to:{opacity:"1"}}
-          },
-          animation: { fadeInUp:"fadeInUp 1s ease forwards", zoomIn:"zoomIn 1s ease forwards", fadeInBody:"fadeInBody 1s ease-in" }
-        } }
-      };
-    </script>
-    <style>
-      body { background: linear-gradient(120deg, #e0f2fe 0%, #dbeafe 100%); min-height: 100vh; display:flex; justify-content:center; align-items:center; }
-      .whatsapp-btn { transition: all 0.3s ease; }
-      .whatsapp-btn:hover { transform: translateY(-3px); box-shadow: 0 10px 25px rgba(30,64,175,0.3), 0 5px 10px rgba(14,165,233,0.2); }
-    </style>
-  </head>
-  <body class="bg-white text-black font-sans overflow-x-hidden min-h-screen flex justify-center items-start animate-fadeInBody">
-    <div class="w-full max-w-7xl p-4 animate-fadeInUp mx-auto">
-      <section class="text-center p-2 opacity-0 animate-fadeInUp [animation-delay:0.8s]">
-        <img src="{{LOGO_URL}}" alt="{{BRAND_NAME}} Banner"
-             class="w-4/5 max-w-[300px] md:max-w-[300px] rounded-xl mx-auto mb-5 shadow-[0_10px_30px_rgba(29,78,216,0.3)] opacity-0 animate-zoomIn [animation-delay:1s]" />
-        <h2 class="text-3xl md:text-3xl mb-4 font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text opacity-0 animate-fadeInUp [animation-delay:1.2s]">
-          {{HEADING}}
-        </h2>
-        <p class="text-md leading-relaxed max-w-[600px] mx-auto mb-6 opacity-0 animate-fadeInUp [animation-delay:1.4s]">
-          {{SUBHEADING}}
-        </p>
-        <p class="text-md leading-relaxed max-w-[600px] mx-auto mb-6 opacity-0 animate-fadeInUp [animation-delay:1.4s]">
-          {{DESCRIPTION}}
-        </p>
-        <div class="flex flex-col md:flex-row justify-center space-y-4 md:space-y-0 md:space-x-4 ">
-          <a href="https://wa.me/{{WHATSAPP_NUMBER}}"
-             class="whatsapp-btn bg-gradient-to-r from-sky-400 to-blue-700 text-white py-4 px-8 rounded-full font-bold text-lg transition-all duration-300 inline-flex items-center justify-center space-x-3 shadow-lg hover:shadow-xl opacity-0 animate-zoomIn [animation-delay:0.5s] hover:scale-105">
-            <i class="fab fa-whatsapp text-xl"></i>
-            <span>Chat with us on WhatsApp</span>
-            <span class="absolute inset-0 rounded-full bg-white opacity-0 group-hover:opacity-20 transition-opacity duration-500"></span>
-          </a>
-        </div>
-        <p class="text-[12px] leading-relaxed max-w-[600px] mx-auto mt-4 opacity-0 animate-fadeInUp [animation-delay:1.8s] text-center">
-          <strong>Disclaimer:</strong> {{DISCLAIMER}}
-        </p>
-      </section>
-    </div>
-  </body>
-</html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>{{PAGE_TITLE}}</title>
+<meta name="description" content="{{META_DESCRIPTION}}"/><meta name="keywords" content="{{META_KEYWORDS}}"/>
+<meta name="author" content="{{BRAND_NAME}}"/><meta name="robots" content="index, follow"/>
+<link rel="canonical" href="{{CANONICAL_URL}}"/><meta property="og:title" content="{{OG_TITLE}}"/>
+<meta property="og:description" content="{{OG_DESCRIPTION}}"/><meta property="og:image" content="{{OG_IMAGE}}"/>
+<meta property="og:url" content="{{OG_URL}}"/><meta property="og:type" content="website"/>
+<link rel="icon" href="{{FAVICON_URL}}" type="image/jpeg"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+body{background:linear-gradient(120deg,#e0f2fe 0%,#dbeafe 100%);min-height:100vh;display:flex;justify-content:center;align-items:center}
+.whatsapp-btn{transition:.3s}.whatsapp-btn:hover{transform:translateY(-3px);box-shadow:0 10px 25px rgba(30,64,175,.3),0 5px 10px rgba(14,165,233,.2)}
+</style></head>
+<body class="bg-white text-black font-sans overflow-x-hidden min-h-screen flex justify-center items-start">
+<div class="w-full max-w-7xl p-4 mx-auto"><section class="text-center p-2">
+<img src="{{LOGO_URL}}" alt="{{BRAND_NAME}} Banner" class="w-4/5 max-w-[300px] rounded-xl mx-auto mb-5"/>
+<h2 class="text-3xl font-bold">Unlock Automated Trading Excellence</h2>
+<p class="max-w-[600px] mx-auto mb-6">{{SUBHEADING}}</p>
+<p class="max-w-[600px] mx-auto mb-6">{{DESCRIPTION}}</p>
+<div class="flex justify-center">
+  <a href="https://wa.me/{{WHATSAPP_NUMBER}}" class="whatsapp-btn bg-blue-600 text-white py-3 px-6 rounded-full font-bold inline-flex items-center gap-2">
+    <i class="fab fa-whatsapp"></i><span>Chat with us on WhatsApp</span>
+  </a>
+</div>
+<p class="text-[12px] max-w-[600px] mx-auto mt-4"><strong>Disclaimer:</strong> {{DISCLAIMER}}</p>
+</section></div></body></html>
 """
 
 
 def render_landing_html(lp: Dict) -> str:
-    html = (
+    return (
         LANDING_TEMPLATE.replace(
             "{{PAGE_TITLE}}", f"{lp['name']} | Automated AI-Powered Trading Platform"
         )
@@ -314,13 +265,9 @@ def render_landing_html(lp: Dict) -> str:
         .replace("{{OG_URL}}", lp.get("og_url", "https://www.oneaisolutions.com/"))
         .replace("{{FAVICON_URL}}", lp.get("favicon", lp.get("logo_url", "logo.jpg")))
         .replace("{{LOGO_URL}}", lp.get("logo_url", "logo.jpg"))
-        .replace("{{HEADING}}", "Unlock Automated Trading Excellence")
         .replace(
             "{{SUBHEADING}}",
-            lp.get(
-                "sub",
-                "Seamless API integration, expert algorithmic tools, and emotion-free trading management.",
-            ),
+            lp.get("sub", "Seamless API integration, expert tools, emotion-free risk."),
         )
         .replace(
             "{{DESCRIPTION}}",
@@ -332,12 +279,12 @@ def render_landing_html(lp: Dict) -> str:
             lp.get("disclaimer", "Educational purpose only. Trading involves risk."),
         )
     )
-    return html
 
 
-# =========================
-# UI Helpers
-# =========================
+# ===================== UI Helpers =====================
+MENU_REGEX = r"^(🔄 Start|🖼️ Create a Post|🧩 Create a Landing Page|🧪 Service Demos|📢 Join Channel|🌐 Follow Us|❌ Cancel)$"
+
+
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton("🔄 Start"), KeyboardButton("🖼️ Create a Post")],
@@ -346,7 +293,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton("🧪 Service Demos"),
         ],
         [KeyboardButton("📢 Join Channel"), KeyboardButton("🌐 Follow Us")],
-        [KeyboardButton("❌ Cancel")],  # quick escape from any flow
+        [KeyboardButton("❌ Cancel")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
@@ -362,9 +309,7 @@ def footer_inline_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📍 Location", callback_data="FOOTER:location"),
                 InlineKeyboardButton("☎️ Contact", callback_data="FOOTER:contact"),
             ],
-            [
-                InlineKeyboardButton("📞 Direct Call (Sales)", url="tel:+918982285510"),
-            ],
+            [InlineKeyboardButton("📞 Direct Call (Sales)", url="tel:+918982285510")],
         ]
     )
 
@@ -398,9 +343,7 @@ def service_demos_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-# =========================
-# Keyword Q&A
-# =========================
+# =================== Q&A helpers ======================
 def detect_topic(q: str) -> str:
     s = q.lower()
     if any(
@@ -439,14 +382,12 @@ def answer_for_topic(topic: str) -> Tuple[str, List[Tuple[str, str]]]:
     p = KB["pricing"]
     if topic == "pricing":
         txt = dedent(
-            f"""
-        💸 **Pricing (Summary)**
-        • Web Dev: Static {p['web_development']['Static Website']}, Dynamic {p['web_development']['Dynamic Normal Website']}, Full {p['web_development']['Fully Functional Aesthetic Website']}
-        • Video Editing: Ads 30s ₹500 / 60s ₹1000 / 2m ₹2000; Social 5m ₹1000 / 10m ₹2000 / 20m ₹2500; UGC ₹3000; App Ads 1m ₹500
-        • Graphics: Logo ₹2000 (others custom)
-        • Social Media Mgmt: {p['smm']}
-        • Ads: Budget-based
-        """
+            f"""💸 **Pricing (Summary)**
+• Web Dev: Static {p['web_development']['Static Website']}, Dynamic {p['web_development']['Dynamic Normal Website']}, Full {p['web_development']['Fully Functional Aesthetic Website']}
+• Video: Ads 30s ₹500 / 60s ₹1000 / 2m ₹2000; Social 5m ₹1000 / 10m ₹2000 / 20m ₹2500; UGC ₹3000; App Ads 1m ₹500
+• Graphics: Logo ₹2000 (others custom)
+• SMM: {p['smm']}
+• Ads: Budget-based"""
         ).strip()
         sug = [
             ("🖥️ Web pricing details", "ASK:pricing:web"),
@@ -457,134 +398,142 @@ def answer_for_topic(topic: str) -> Tuple[str, List[Tuple[str, str]]]:
     if topic == "pricing_web":
         wp = p["web_development"]
         txt = dedent(
-            f"""
-        🖥️ **Web Development Pricing**
-        • Static Website: {wp['Static Website']}
-        • Dynamic Normal Website: {wp['Dynamic Normal Website']}
-        • Fully Functional Aesthetic: {wp['Fully Functional Aesthetic Website']}
-        _Final quote pages/features per depend karta hai._
-        """
+            f"""🖥️ **Web Development Pricing**
+• Static: {wp['Static Website']}
+• Dynamic: {wp['Dynamic Normal Website']}
+• Fully Aesthetic: {wp['Fully Functional Aesthetic Website']}
+_Final quote features/pages per depend karta hai._"""
         ).strip()
-        sug = [
+        return txt, [
             ("🚀 Get a web quote", "ASK:contact"),
-            ("📚 See website demos", "DEMOS:web"),
-            ("📦 Other services", "ASK:services"),
+            ("📚 Website demos", "DEMOS:web"),
+            ("📦 All services", "ASK:services"),
         ]
-        return txt, sug
     if topic == "pricing_video":
         vp = p["video_editing"]
         txt = dedent(
-            f"""
-        🎥 **Video Editing Pricing**
-        • Ads: 30s ₹{vp['Advertisements']['30 sec']} / 60s ₹{vp['Advertisements']['60 sec']} / 2m ₹{vp['Advertisements']['2 min']}
-        • Social: 5m ₹{vp['Social Media Videos']['5 min']} / 10m ₹{vp['Social Media Videos']['10 min']} / 20m+ ₹{vp['Social Media Videos']['20+ min']}
-        • App Ads: 1m ₹{vp['Application Ads']['1 min']}
-        • UGC: ₹{vp['UGC Videos']['standard']}
-        """
+            f"""🎥 **Video Editing Pricing**
+• Ads: 30s ₹{vp['Advertisements']['30 sec']} / 60s ₹{vp['Advertisements']['60 sec']} / 2m ₹{vp['Advertisements']['2 min']}
+• Social: 5m ₹{vp['Social Media Videos']['5 min']} / 10m ₹{vp['Social Media Videos']['10 min']} / 20m+ ₹{vp['Social Media Videos']['20+ min']}
+• App Ads: 1m ₹{vp['Application Ads']['1 min']}
+• UGC: ₹{vp['UGC Videos']['standard']}"""
         ).strip()
-        sug = [
-            ("🎬 See video demos", "DEMOS:video"),
+        return txt, [
+            ("🎬 Video demos", "DEMOS:video"),
             ("📞 Talk to editor", "ASK:contact"),
             ("📦 All services", "ASK:services"),
         ]
-        return txt, sug
     if topic == "pricing_graphic":
         gp = p["graphic_designing"]
         txt = dedent(
-            f"""
-        🎨 **Graphic Designing Pricing**
-        • Logo Design: {gp['Logo Design']}
-        • Other Designs: {gp['Other Designs']}
-        """
+            f"""🎨 **Graphic Designing Pricing**
+• Logo: {gp['Logo Design']}
+• Other: {gp['Other Designs']}"""
         ).strip()
-        sug = [
-            ("🖼️ Portfolio / ads", "DEMOS:ads"),
+        return txt, [
+            ("🖼️ Ads/portfolio", "DEMOS:ads"),
             ("📞 Discuss brief", "ASK:contact"),
             ("📦 All services", "ASK:services"),
         ]
-        return txt, sug
     if topic == "services":
         s_list = "\n".join([f"• {s}" for s in KB["services"]])
-        txt = f"📦 **Services We Provide**\n{s_list}"
-        sug = [
-            ("💸 Pricing overview", "ASK:pricing"),
-            ("📍 Our location", "ASK:location"),
-            ("☎️ Contact us", "ASK:contact"),
+        return f"📦 **Services We Provide**\n{s_list}", [
+            ("💸 Pricing", "ASK:pricing"),
+            ("📍 Location", "ASK:location"),
+            ("☎️ Contact", "ASK:contact"),
         ]
-        return txt, sug
     if topic == "location":
-        txt = f"📍 **Location**\n{c['hq']}"
-        sug = [
+        return f"📍 **Location**\n{c['hq']}", [
             ("🗺️ Open channel", "OPEN:channel"),
             ("☎️ Contact", "ASK:contact"),
-            ("💼 Why choose us?", "ASK:about"),
+            ("💼 Why us?", "ASK:about"),
         ]
-        return txt, sug
     if topic == "contact":
-        txt = f"☎️ **Contact**\nEmail: {c['email']}\nPhone: {c['phone']}"
-        sug = [
+        return f"☎️ **Contact**\nEmail: {c['email']}\nPhone: {c['phone']}", [
             ("📞 Call sales", "CALL:sales"),
             ("💬 WhatsApp", "OPEN:whatsapp"),
             ("📣 Join Telegram", "OPEN:channel"),
         ]
-        return txt, sug
     if topic == "about":
         txt = dedent(
-            f"""
-        🏢 **About {c['name']}**
-        Type: {KB['company']['type']}
-        Founded: {c['founded_years']}
-        Founder & CEO: {c['founder_ceo']}
-        Team: {c['employees']} | Clients: {c['active_clients']}
-        Why us: {KB['why_us']}
-        """
+            f"""🏢 **About {c['name']}**
+Type: {KB['company']['type']}
+Founded: {c['founded_years']}
+Founder & CEO: {c['founder_ceo']}
+Team: {c['employees']} | Clients: {c['active_clients']}
+Why us: {KB['why_us']}"""
         ).strip()
-        sug = [
+        return txt, [
             ("🏆 Awards/clients", "ASK:cred"),
             ("📦 Services", "ASK:services"),
             ("💸 Pricing", "ASK:pricing"),
         ]
-        return txt, sug
     if topic == "cred":
         ach = "\n".join([f"• {x}" for x in c["achievements"]])
         cli = ", ".join(c["major_clients"])
-        txt = f"🏆 **Achievements**\n{ach}\n\n👥 **Major Clients**\n{cli}"
-        sug = [
+        return f"🏆 **Achievements**\n{ach}\n\n👥 **Major Clients**\n{cli}", [
             ("🎯 Target clients", "ASK:target"),
             ("📦 Services", "ASK:services"),
             ("💸 Pricing", "ASK:pricing"),
         ]
-        return txt, sug
     if topic == "target":
         t = ", ".join(c["targets"])
         inds = ", ".join(KB["industries"])
-        txt = f"🎯 **We typically work with**: {t}\n🌐 **Industries**: {inds}"
-        sug = [
+        return f"🎯 **We work with**: {t}\n🌐 **Industries**: {inds}", [
             ("📦 Services", "ASK:services"),
             ("☎️ Contact", "ASK:contact"),
-            ("🧪 See demos", "DEMOS:web"),
+            ("🧪 Demos", "DEMOS:web"),
         ]
-        return txt, sug
-    txt = "🙏 Thanks! Aap apna question thoda specific karein ya niche quick options use karein."
-    sug = [
+    txt = "🙏 Thanks! Aap apna question thoda specific karein ya quick options use karein."
+    return txt, [
         ("📦 Services", "ASK:services"),
         ("💸 Pricing", "ASK:pricing"),
         ("📍 Location", "ASK:location"),
     ]
-    return txt, sug
 
 
-# =========================
-# Create Post Conversation
-# =========================
+# ================== Conversations =====================
 CREATE_POST_IMAGE, CREATE_POST_LINK = range(2)
+LP_NAME, LP_SUB, LP_DESC, LP_COLOR, LP_LOGO_PROMPT, LP_LOGO_DATA, LP_CONFIRM = range(7)
 
 
+def upi_uri(amount: int) -> str:
+    return f"upi://pay?pa={quote(UPI_ID)}&pn={quote(UPI_NAME)}&am={amount}&cu=INR&tn={quote('Landing Page Design')}"
+
+
+def make_qr_png_bytes(uri: str) -> bytes:
+    img = qrcode.make(uri)
+    bio = io.BytesIO()
+    img.save(bio, format="PNG")
+    bio.seek(0)
+    return bio.read()
+
+
+async def jump_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if text == "🔄 Start":
+        await start(update, context)
+    elif text == "🖼️ Create a Post":
+        await start_post_flow(update, context)
+    elif text == "🧩 Create a Landing Page":
+        await start_lp_flow(update, context)
+    elif text == "🧪 Service Demos":
+        await show_demos(update, context)
+    elif text == "📢 Join Channel":
+        await join_channel(update, context)
+    elif text == "🌐 Follow Us":
+        await follow_us(update, context)
+    elif text == "❌ Cancel":
+        await cancel(update, context)
+    return ConversationHandler.END
+
+
+# ---- Create Post ----
 async def start_post_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["post"] = {}
     crm_log(update.effective_user, "create_post_start", "post")
     await update.message.reply_text(
-        "🖼️ *Create a Post*\nPlease send me the *image/photo* you want to use.\n(You can /cancel anytime.)",
+        "🖼️ *Create a Post*\nPlease send the *image/photo*.\n(Use any menu key to switch or /cancel.)",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard(),
     )
@@ -598,8 +547,7 @@ async def receive_post_image(update: Update, context: ContextTypes.DEFAULT_TYPE)
     file_id = update.message.photo[-1].file_id
     context.user_data["post"]["photo_id"] = file_id
     await update.message.reply_text(
-        "Got it! Now send the *phone number / website / any link* for the CTA.\n"
-        "Examples:\n• +918982285510\n• https://yourdomain.com\n• mailto:you@email.com",
+        "Great! Now send the *phone no / website / any link* for CTA.",
         parse_mode="Markdown",
     )
     crm_log(update.effective_user, "create_post_photo", "post", {"file_id": file_id})
@@ -613,7 +561,7 @@ def normalize_link(link: str) -> Tuple[str, str]:
         return f"tel:{tel}", "📞 Call Now"
     if re.match(r"(?i)mailto:", s) or re.match(r"[^@]+@[^@]+\.[^@]+", s):
         if not s.lower().startswith("mailto:"):
-            s = f"mailto:{s}"
+            s = "mailto:" + s
         return s, "✉️ Email Now"
     if not re.match(r"(?i)https?://", s):
         s = "https://" + s
@@ -625,15 +573,12 @@ async def receive_post_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url, cta = normalize_link(link)
     context.user_data["post"]["cta_url"] = url
     context.user_data["post"]["cta_label"] = cta
-
     cap = (
         "🔥 *Metabull Universe — Promotional Post*\n"
         "Grow with Creative + IT + Marketing (Ads • Videos • Graphics • Websites • Social).\n"
-        "_Tap the CTA to proceed!_\n"
+        "_Tap the CTA to proceed!_"
     )
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(context.user_data["post"]["cta_label"], url=url)]]
-    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(cta, url=url)]])
     await update.message.reply_photo(
         photo=context.user_data["post"]["photo_id"],
         caption=cap,
@@ -647,32 +592,12 @@ async def receive_post_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# =========================
-# Landing Page Conversation
-# =========================
-LP_NAME, LP_SUB, LP_DESC, LP_COLOR, LP_LOGO_PROMPT, LP_LOGO_DATA, LP_CONFIRM = range(7)
-
-
-def upi_uri(amount: int) -> str:
-    return (
-        f"upi://pay?pa={quote(UPI_ID)}&pn={quote(UPI_NAME)}"
-        f"&am={amount}&cu=INR&tn={quote('Landing Page Design')}"
-    )
-
-
-def make_qr_png_bytes(uri: str) -> bytes:
-    img = qrcode.make(uri)
-    bio = io.BytesIO()
-    img.save(bio, format="PNG")
-    bio.seek(0)
-    return bio.read()
-
-
+# ---- Landing Page ----
 async def start_lp_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["lp"] = {}
     crm_log(update.effective_user, "lp_start", "landing_page")
     await update.message.reply_text(
-        "🧩 *Landing Page Wizard*\nStep 1/6 — Send *Landing Page / Brand Name*.\n(You can /cancel anytime.)",
+        "🧩 *Landing Page Wizard*\nStep 1/6 — Send *Landing Page / Brand Name*.\n(Use any menu key to switch or /cancel.)",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard(),
     )
@@ -726,26 +651,22 @@ async def lp_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
         {"color": context.user_data["lp"]["color"]},
     )
     await update.message.reply_text(
-        "Step 5/6 — Send *Logo*: \n• Upload a *photo*, or\n• Send a direct *logo URL*, or\n• Type *skip*.",
+        "Step 5/6 — Send *Logo*: upload a *photo*, or send a *logo URL*, or type *skip*.",
         parse_mode="Markdown",
     )
     return LP_LOGO_PROMPT
 
 
-# NOTE: we handle only valid inputs here via filters (see wiring below)
 async def lp_logo_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
-
-    if text.lower() == "skip":
+    if re.match(r"(?i)^\s*skip\s*$", text):
         context.user_data["lp"]["logo_url"] = "logo.jpg"
         return await lp_logo_done(update, context)
-
-    if text.lower().startswith("http://") or text.lower().startswith("https://"):
-        context.user_data["lp"]["logo_url"] = text
+    if re.match(r"(?i)^\s*https?://\S+\s*$", text):
+        context.user_data["lp"]["logo_url"] = text.strip()
         return await lp_logo_done(update, context)
-
     await update.message.reply_text(
-        "Please upload a *photo*, send a direct *logo URL*, or type *skip*.",
+        "Please upload a *photo*, send a *logo URL*, or type *skip*.",
         parse_mode="Markdown",
     )
     return LP_LOGO_PROMPT
@@ -755,7 +676,6 @@ async def lp_logo_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo:
         await update.message.reply_text("Please send a *photo*.", parse_mode="Markdown")
         return LP_LOGO_DATA
-
     file = await update.message.photo[-1].get_file()
     bio = io.BytesIO()
     await file.download_to_memory(out=bio)
@@ -771,36 +691,45 @@ async def lp_logo_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def lp_logo_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lp = context.user_data["lp"]
     preview = dedent(
-        f"""
-    ✅ *Details captured:*
-    • Name: {lp['name']}
-    • Subheading: {lp['sub']}
-    • Theme: {lp['color']}
-    • Description: {lp['desc'][:200]}...
-    """
+        f"""✅ *Details captured:*
+• Name: {lp['name']}
+• Subheading: {lp['sub']}
+• Theme: {lp['color']}
+• Description: {lp['desc'][:200]}..."""
     ).strip()
     await update.message.reply_text(preview, parse_mode="Markdown")
 
     uri = upi_uri(LP_PRICE)
-    qr_png = make_qr_png_bytes(uri)
-    await update.message.reply_photo(
-        photo=InputFile(io.BytesIO(qr_png), filename="upi_qr.png"),
-        caption=(
-            f"🧾 *Payment Required*: ₹{LP_PRICE}\n"
-            f"UPI ID: `{UPI_ID}`\nName: {UPI_NAME}\n\n"
-            "Tap *Pay ₹1200* (if supported) or scan the QR in your UPI app.\n"
-            "After payment, press **I've paid**."
-        ),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton(f"💳 Pay ₹{LP_PRICE}", url=uri)],
-                [InlineKeyboardButton("✅ I've paid", callback_data="LP:PAID")],
-                [InlineKeyboardButton("✏️ Edit details", callback_data="LP:EDIT")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="LP:CANCEL")],
-            ]
-        ),
+    kb = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(f"💳 Pay ₹{LP_PRICE}", url=uri)],
+            [InlineKeyboardButton("✅ I've paid", callback_data="LP:PAID")],
+            [InlineKeyboardButton("✏️ Edit details", callback_data="LP:EDIT")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="LP:CANCEL")],
+        ]
     )
+    try:
+        qr_png = make_qr_png_bytes(uri)
+        await update.message.reply_photo(
+            photo=InputFile(io.BytesIO(qr_png), filename="upi_qr.png"),
+            caption=(
+                f"🧾 *Payment Required*: ₹{LP_PRICE}\nUPI ID: `{UPI_ID}`\nName: {UPI_NAME}\n"
+                "Scan the QR or tap **Pay ₹1200**. After payment, press **I've paid** or send *I've paid*."
+            ),
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+    except Exception as e:
+        log.error("QR error: %s", e)
+        await update.message.reply_text(
+            (
+                f"🧾 *Payment Required*: ₹{LP_PRICE}\nUPI ID: `{UPI_ID}`\nName: {UPI_NAME}\n"
+                "Tap *Pay ₹1200* (UPI link) and then press **I've paid** or send *I've paid*."
+            ),
+            parse_mode="Markdown",
+            reply_markup=kb,
+        )
+
     crm_log(update.effective_user, "lp_review", "landing_page", lp)
     return LP_CONFIRM
 
@@ -808,12 +737,10 @@ async def lp_logo_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def lp_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
     if q.data == "LP:CANCEL":
         await q.edit_message_caption(caption="❌ Landing page flow cancelled.")
         crm_log(update.effective_user, "lp_cancel", "landing_page")
         return ConversationHandler.END
-
     if q.data == "LP:EDIT":
         await q.edit_message_caption(
             caption="✏️ Let's edit — send the *Landing Page Name* again.",
@@ -822,38 +749,41 @@ async def lp_confirm_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         crm_log(update.effective_user, "lp_edit_restart", "landing_page")
         context.user_data["lp"] = {}
         return LP_NAME
-
     if q.data == "LP:PAID":
-        lp = context.user_data.get("lp", {})
-        if not lp:
-            await q.edit_message_caption(
-                caption="Hmm, details missing. Please restart the flow."
-            )
-            return ConversationHandler.END
-
-        lp.setdefault("whatsapp", "919009937449")
-        lp.setdefault(
-            "disclaimer",
-            "One AI Solutions provides information for educational purposes only. Trading involves risk.",
-        )
-        html = render_landing_html(lp)
-        bio = io.BytesIO(html.encode("utf-8"))
-        bio.name = "landing_page.html"
-        await q.message.reply_document(
-            document=InputFile(bio, filename="landing_page.html"),
-            caption="✅ Payment confirmed (manual). Here's your landing_page.html — deploy anywhere.\nNeed hosting/support? Reply here!",
-        )
-        await q.message.reply_text("Explore:", reply_markup=footer_inline_keyboard())
-        crm_log(update.effective_user, "lp_paid", "landing_page", lp)
+        await deliver_landing_html(q.message, update, context)
         return ConversationHandler.END
 
 
-# =========================
-# Demos / Join / Follow
-# =========================
+async def lp_manual_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await deliver_landing_html(update.message, update, context)
+    return ConversationHandler.END
+
+
+async def deliver_landing_html(target_msg, update, context):
+    lp = context.user_data.get("lp", {})
+    if not lp:
+        await target_msg.reply_text("Details missing. Please restart the flow.")
+        return
+    lp.setdefault("whatsapp", "919009937449")
+    lp.setdefault(
+        "disclaimer",
+        "One AI Solutions provides information for educational purposes only. Trading involves risk.",
+    )
+    html = render_landing_html(lp)
+    bio = io.BytesIO(html.encode("utf-8"))
+    bio.name = "landing_page.html"
+    await target_msg.reply_document(
+        document=InputFile(bio, filename="landing_page.html"),
+        caption="✅ Payment confirmed (manual). Here's your landing_page.html — deploy anywhere.\nNeed hosting/support? Reply here!",
+    )
+    await target_msg.reply_text("Explore:", reply_markup=footer_inline_keyboard())
+    crm_log(update.effective_user, "lp_paid", "landing_page", lp)
+
+
+# =================== Demos / Misc =====================
 async def show_demos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧪 *Service Demos*\nChoose an option:",
+        "🧪 *Service Demos* — choose:",
         parse_mode="Markdown",
         reply_markup=service_demos_keyboard(),
     )
@@ -863,15 +793,19 @@ async def show_demos(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def demos_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    if q.data == "DEMOS:video":
+    data = q.data
+    if data == "DEMOS:video":
         text = "🎬 *Video demos:*\n" + "\n".join([f"• {u}" for u in VIDEO_DEMOS])
         tag = "demos_video"
-    elif q.data == "DEMOS:web":
+    elif data == "DEMOS:web":
         text = "🕸️ *Website demos:*\n" + "\n".join([f"• {u}" for u in WEBSITE_DEMOS])
         tag = "demos_web"
-    else:
+    elif data == "DEMOS:ads":
         text = "📣 *Ads links:*\n" + "\n".join([f"• {u}" for u in ADS_LINKS])
         tag = "demos_ads"
+    else:
+        text = "(unknown demo)"
+        tag = "demos_unknown"
     await q.message.reply_text(
         text, parse_mode="Markdown", reply_markup=footer_inline_keyboard()
     )
@@ -893,9 +827,6 @@ async def follow_us(update: Update, context: ContextTypes.DEFAULT_TYPE):
     crm_log(update.effective_user, "follow_us", "nav")
 
 
-# =========================
-# Footer callbacks
-# =========================
 async def footer_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -909,7 +840,7 @@ async def footer_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data in mapping:
         txt, sug = answer_for_topic(mapping[data])
         await q.message.reply_text(
-            txt, reply_markup=suggestions_keyboard(sug), parse_mode="Markdown"
+            txt, parse_mode="Markdown", reply_markup=suggestions_keyboard(sug)
         )
         crm_log(update.effective_user, "footer_click", mapping[data])
     else:
@@ -919,15 +850,11 @@ async def footer_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         crm_log(update.effective_user, "footer_call", "call")
 
 
-# =========================
-# Start / Cancel / Generic
-# =========================
+# ================= Start / Cancel / Generic ===========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = dedent(
-        f"""
-    👋 Welcome to *{KB['company']['name']}* — Creative + IT + Marketing.
-    Ask anything (pricing, services, location, contact, demos), or use the menu below.
-    """
+        f"""👋 Welcome to *{KB['company']['name']}* — Creative + IT + Marketing.
+Ask anything (pricing, services, location, contact, demos), or use the menu below."""
     ).strip()
     msg = update.message or update.callback_query.message
     await msg.reply_text(
@@ -946,8 +873,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def generic_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-
-    # Menu routing
     if text == "❌ Cancel":
         await cancel(update, context)
         return
@@ -978,31 +903,38 @@ async def generic_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     crm_log(update.effective_user, "ask", topic, {"q": text})
 
 
-# =========================
-# App wiring
-# =========================
+# ================== App wiring ========================
 def app():
     if not BOT_TOKEN:
-        raise SystemExit("Please set BOT_TOKEN in .env")
-
+        raise SystemExit("Please set BOT_TOKEN")
     _init_sheets()
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # /start & /cancel
+    # DEMOS callbacks (global)
+    application.add_handler(
+        CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$")
+    )
+
+    # commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel))
 
-    # Create Post conversation
+    # Create Post convo
     post_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^🖼️ Create a Post$"), start_post_flow)
         ],
         states={
-            # accept only photos at the first step
-            CREATE_POST_IMAGE: [MessageHandler(filters.PHOTO, receive_post_image)],
+            CREATE_POST_IMAGE: [
+                MessageHandler(filters.PHOTO, receive_post_image),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
+            ],
             CREATE_POST_LINK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_post_link)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_post_link),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
             ],
         },
         fallbacks=[
@@ -1015,25 +947,56 @@ def app():
     )
     application.add_handler(post_conv)
 
-    # Landing Page conversation (fixed filters at logo step)
+    # Landing Page convo
+    LP_NAME, LP_SUB, LP_DESC, LP_COLOR, LP_LOGO_PROMPT, LP_LOGO_DATA, LP_CONFIRM = (
+        range(7)
+    )
     lp_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^🧩 Create a Landing Page$"), start_lp_flow)
         ],
         states={
-            LP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_name)],
-            LP_SUB: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_sub)],
-            LP_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_desc)],
-            LP_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_color)],
-            # Only accept: photo, 'skip', or URL at the logo prompt
+            LP_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lp_name),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
+            ],
+            LP_SUB: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lp_sub),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
+            ],
+            LP_DESC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lp_desc),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
+            ],
+            LP_COLOR: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lp_color),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
+            ],
             LP_LOGO_PROMPT: [
                 MessageHandler(filters.PHOTO, lp_logo_data),
-                MessageHandler(filters.Regex(r"(?i)^skip$"), lp_logo_prompt),
-                MessageHandler(filters.Regex(r"(?i)^https?://\S+$"), lp_logo_prompt),
+                MessageHandler(filters.Regex(r"(?i)^\s*skip\s*$"), lp_logo_prompt),
+                MessageHandler(
+                    filters.Regex(r"(?i)^\s*https?://\S+\s*$"), lp_logo_prompt
+                ),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
             ],
-            LP_LOGO_DATA: [MessageHandler(filters.PHOTO, lp_logo_data)],
+            LP_LOGO_DATA: [
+                MessageHandler(filters.PHOTO, lp_logo_data),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
+            ],
             LP_CONFIRM: [
-                CallbackQueryHandler(lp_confirm_cb, pattern=r"^LP:(PAID|EDIT|CANCEL)$")
+                CallbackQueryHandler(lp_confirm_cb, pattern=r"^LP:(PAID|EDIT|CANCEL)$"),
+                MessageHandler(
+                    filters.Regex(r"(?i)^\s*(i'?ve\s+paid|paid)\s*$"), lp_manual_paid
+                ),
+                MessageHandler(filters.Regex(MENU_REGEX), jump_menu),
+                CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(?:video|web|ads)$"),
             ],
         },
         fallbacks=[
@@ -1046,60 +1009,12 @@ def app():
     )
     application.add_handler(lp_conv)
 
-    # Demos
-    application.add_handler(
-        MessageHandler(filters.Regex("^🧪 Service Demos$"), show_demos)
-    )
-    application.add_handler(
-        CallbackQueryHandler(demos_cb, pattern=r"^DEMOS:(video|web|ads)$")
-    )
-
-    # Footer
+    # Footer / openers
     application.add_handler(
         CallbackQueryHandler(
             footer_cb, pattern=r"^FOOTER:(services|prices|location|contact|call)$"
         )
     )
-
-    # Suggestions ASK:* + OPEN:* + CALL:*
-    def _reply(topic_key):
-        async def _h(u: Update, c: ContextTypes.DEFAULT_TYPE):
-            txt, sug = answer_for_topic(topic_key)
-            await u.callback_query.message.reply_text(
-                txt, parse_mode="Markdown", reply_markup=suggestions_keyboard(sug)
-            )
-            crm_log(u.effective_user, "ask_suggestion", topic_key)
-
-        return _h
-
-    application.add_handler(
-        CallbackQueryHandler(_reply("pricing_web"), pattern=r"^ASK:pricing:web$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(_reply("pricing_video"), pattern=r"^ASK:pricing:video$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            _reply("pricing_graphic"), pattern=r"^ASK:pricing:graphic$"
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(_reply("services"), pattern=r"^ASK:services$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(_reply("location"), pattern=r"^ASK:location$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(_reply("contact"), pattern=r"^ASK:contact$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(_reply("about"), pattern=r"^ASK:about$")
-    )
-    application.add_handler(CallbackQueryHandler(_reply("cred"), pattern=r"^ASK:cred$"))
-    application.add_handler(
-        CallbackQueryHandler(_reply("target"), pattern=r"^ASK:target$")
-    )
-
     application.add_handler(
         CallbackQueryHandler(
             lambda u, c: u.callback_query.message.reply_text(
@@ -1131,13 +1046,33 @@ def app():
         )
     )
 
-    # Generic Q&A (fallback)
+    # “Service Demos” entry (reply keyboard)
+    application.add_handler(
+        MessageHandler(filters.Regex("^🧪 Service Demos$"), show_demos)
+    )
+
+    # Fallback Q&A
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, generic_query)
     )
-
     return application
 
 
+# ---- RUN: polling (local) or webhook (Railway) ----
 if __name__ == "__main__":
-    app().run_polling()
+    application = app()
+    if USE_WEBHOOK and WEBHOOK_URL:
+        # One-line webhook runner (no asyncio.run, loop handled by PTB)
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path="",  # path is optional if WEBHOOK_URL is full
+            webhook_url=WEBHOOK_URL,  # PTB will set the webhook
+            drop_pending_updates=True,
+        )
+    else:
+        # Safe polling; PTB drops pending + clears webhook internally
+        application.run_polling(
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
