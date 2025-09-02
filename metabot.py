@@ -1,8 +1,9 @@
-# bot.py — Metabull Universe Telegram Bot (v3.3)
+# bot.py — Metabull Universe Telegram Bot (v3.4)
 # - Q&A + suggestions
 # - Footer quick actions
 # - Menu: Start / Create a Post / Create a Landing Page (₹1200 UPI) / Service Demos / Join Channel / Follow Us
 # - DEMOS buttons always work (inside/outside conversations)
+# - DEMOS replies are PLAIN TEXT (prevents Markdown parse errors on links)
 # - Landing Page flow: robust payment + “I’ve paid” -> delivers landing_page.html
 # - Google Sheets logging
 # - Jump-to-menu inside conversations
@@ -783,31 +784,36 @@ async def deliver_landing_html(target_msg, update, context):
 # =================== Demos / Misc =====================
 async def show_demos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🧪 *Service Demos* — choose:",
-        parse_mode="Markdown",
-        reply_markup=service_demos_keyboard(),
+        "🧪 Service Demos — choose:", reply_markup=service_demos_keyboard()
     )
     crm_log(update.effective_user, "demos_open", "nav")
 
 
+# PLAIN-TEXT replies to avoid Markdown errors on URLs (fix for Website demos)
 async def demos_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    data = q.data
-    if data == "DEMOS:video":
-        text = "🎬 *Video demos:*\n" + "\n".join([f"• {u}" for u in VIDEO_DEMOS])
+
+    def render_list(title: str, urls: List[str]) -> str:
+        if not urls:
+            return f"{title}\n(Coming soon)"
+        return title + "\n" + "\n".join([f"• {u}" for u in urls])
+
+    if q.data == "DEMOS:video":
+        text = render_list("🎬 Video demos:", VIDEO_DEMOS)
         tag = "demos_video"
-    elif data == "DEMOS:web":
-        text = "🕸️ *Website demos:*\n" + "\n".join([f"• {u}" for u in WEBSITE_DEMOS])
+    elif q.data == "DEMOS:web":
+        text = render_list("🕸️ Website demos:", WEBSITE_DEMOS)
         tag = "demos_web"
-    elif data == "DEMOS:ads":
-        text = "📣 *Ads links:*\n" + "\n".join([f"• {u}" for u in ADS_LINKS])
+    elif q.data == "DEMOS:ads":
+        text = render_list("📣 Ads links:", ADS_LINKS)
         tag = "demos_ads"
     else:
-        text = "(unknown demo)"
+        text = "Demo option not recognized."
         tag = "demos_unknown"
+
     await q.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=footer_inline_keyboard()
+        text, disable_web_page_preview=True, reply_markup=footer_inline_keyboard()
     )
     crm_log(update.effective_user, "demos_list", tag)
 
@@ -948,9 +954,6 @@ def app():
     application.add_handler(post_conv)
 
     # Landing Page convo
-    LP_NAME, LP_SUB, LP_DESC, LP_COLOR, LP_LOGO_PROMPT, LP_LOGO_DATA, LP_CONFIRM = (
-        range(7)
-    )
     lp_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^🧩 Create a Landing Page$"), start_lp_flow)
@@ -1062,16 +1065,14 @@ def app():
 if __name__ == "__main__":
     application = app()
     if USE_WEBHOOK and WEBHOOK_URL:
-        # One-line webhook runner (no asyncio.run, loop handled by PTB)
         application.run_webhook(
             listen="0.0.0.0",
             port=PORT,
-            url_path="",  # path is optional if WEBHOOK_URL is full
-            webhook_url=WEBHOOK_URL,  # PTB will set the webhook
+            url_path="",
+            webhook_url=WEBHOOK_URL,
             drop_pending_updates=True,
         )
     else:
-        # Safe polling; PTB drops pending + clears webhook internally
         application.run_polling(
             allowed_updates=Update.ALL_TYPES,
             drop_pending_updates=True,
