@@ -1,10 +1,11 @@
-# bot.py — Metabull Universe Telegram Bot (Sheets-integrated)
+# bot.py — Metabull Universe Telegram Bot (Sheets-integrated, logo-step fix + cancel)
 # - Keyword Q&A + suggestions
 # - Footer actions (Services/Prices/Location/Contact/Call)
 # - Bottom menu: Start, Create a Post, Create a Landing Page (₹1200 UPI QR), Service Demos, Join Channel, Follow Us
 # - Create a Post: image + link -> CTA post
 # - Landing Page: fills One AI Solutions template; supports logo URL or uploaded photo (base64 embedded)
 # - Google Sheets CRM logging with tags
+# - FIX: LP logo step no longer hijacks unrelated text; /cancel to exit any flow
 
 import os
 import io
@@ -12,6 +13,7 @@ import re
 import json
 import base64
 import datetime
+import logging
 from textwrap import dedent
 from typing import Dict, List, Tuple
 from urllib.parse import quote
@@ -19,6 +21,10 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Logging
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("metabull-bot")
 
 # ---- Google Sheets (gspread) ----
 import gspread
@@ -50,9 +56,9 @@ from telegram.ext import (
 # =========================
 # ENV / CONFIG
 # =========================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8283305214:AAEnN8kCSnXs-wiWFal3-C5wlbUXc-n49FM")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 CHANNEL_URL = os.getenv("COMPANY_CHANNEL_URL", "https://t.me/metabulluniverse")
-UPI_ID = os.getenv("UPI_ID", "")
+UPI_ID = os.getenv("UPI_ID", "you@upi")
 UPI_NAME = os.getenv("UPI_NAME", "Metabull Universe")
 
 SOCIAL = {
@@ -78,12 +84,8 @@ VIDEO_DEMOS = [
     "https://drive.google.com/file/d/VIDEO_DEMO_2/view",
 ]
 WEBSITE_DEMOS = [
-    "https://metabulluniverse.com/",
-    "https://portfolio.metabulluniverse.com/",
-    "https://wamanhaus.com/",
-    "https://lightsteelblue-wren-132358.hostingersite.com/",
-    "https://digitalwonderbox.com/",
-    "https://frescoclothing.shop/",
+    "https://portfolio.metabulluniverse.com/demo-site-1",
+    "https://portfolio.metabulluniverse.com/demo-site-2",
 ]
 ADS_LINKS = [
     "https://www.instagram.com/p/AD_DEMO_1/",
@@ -104,8 +106,6 @@ def _init_sheets():
     global _sheets_client, _worksheet
     if not GSHEET_ID or not SERVICE_JSON_RAW:
         return
-
-    # Accept both raw JSON and path approach
     try:
         if SERVICE_JSON_RAW.strip().startswith("{"):
             info = json.loads(SERVICE_JSON_RAW)
@@ -117,7 +117,6 @@ def _init_sheets():
                 ],
             )
         else:
-            # treat as path
             creds = Credentials.from_service_account_file(
                 SERVICE_JSON_RAW,
                 scopes=[
@@ -127,12 +126,10 @@ def _init_sheets():
             )
         _sheets_client = gspread.authorize(creds)
         sh = _sheets_client.open_by_key(GSHEET_ID)
-        # Prefer "Leads" sheet; else first sheet
         try:
             _worksheet = sh.worksheet("Leads")
         except Exception:
             _worksheet = sh.sheet1
-        # Ensure header exists
         headers = _worksheet.row_values(1)
         needed = [
             "timestamp",
@@ -146,18 +143,17 @@ def _init_sheets():
         ]
         if [h.lower() for h in headers] != needed:
             _worksheet.update([needed])
+        log.info("Google Sheets initialized")
     except Exception as e:
-        print("Sheets init error:", e)
+        log.error("Sheets init error: %s", e)
 
 
 def crm_log(user, action: str, tags: str = "", payload: Dict = None):
-    # user: telegram.User
     try:
         if _worksheet is None:
             _init_sheets()
         if _worksheet is None:
-            return  # Sheets not configured, silently ignore
-
+            return
         ts = datetime.datetime.utcnow().isoformat()
         row = [
             ts,
@@ -171,11 +167,11 @@ def crm_log(user, action: str, tags: str = "", payload: Dict = None):
         ]
         _worksheet.append_row(row, value_input_option="RAW")
     except Exception as e:
-        print("Sheets log error:", e)
+        log.error("Sheets log error: %s", e)
 
 
 # =========================
-# Knowledge Base (normalized)
+# Knowledge Base
 # =========================
 KB = {
     "company": {
@@ -224,16 +220,14 @@ KB = {
 }
 
 # =========================
-# One AI Solutions Landing Template (parameterized)
+# Landing Template
 # =========================
 LANDING_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
     <title>{{PAGE_TITLE}}</title>
-
     <meta name="description" content="{{META_DESCRIPTION}}" />
     <meta name="keywords" content="{{META_KEYWORDS}}" />
     <meta name="author" content="{{BRAND_NAME}}" />
@@ -245,47 +239,27 @@ LANDING_TEMPLATE = """<!DOCTYPE html>
     <meta property="og:url" content="{{OG_URL}}" />
     <meta property="og:type" content="website" />
     <link rel="icon" href="{{FAVICON_URL}}" type="image/jpeg" />
-
     <link rel="stylesheet"
       href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
-        theme: {
-          extend: {
-            colors: {
-              primary: "#1d4ed8",
-              secondary: "#15803d",
-              accent: "black",
-              light: "black"
-            },
-            fontFamily: { sans: ['"Segoe UI"', "Tahoma", "Geneva", "Verdana", "sans-serif"] },
-            keyframes: {
-              fadeInUp: {"0%": {opacity:"0",transform:"translateY(30px)"},
-                         "100%": {opacity:"1",transform:"translateY(0)"}},
-              zoomIn: {"0%": {opacity:"0",transform:"scale(0.8)"},
-                       "100%": {opacity:"1",transform:"scale(1)"}},
-              fadeInBody: {from:{opacity:"0"},to:{opacity:"1"}}
-            },
-            animation: {
-              fadeInUp: "fadeInUp 1s ease forwards",
-              zoomIn: "zoomIn 1s ease forwards",
-              fadeInBody: "fadeInBody 1s ease-in"
-            }
-          }
-        }
+        theme: { extend: {
+          colors: { primary:"#1d4ed8", secondary:"#15803d", accent:"black", light:"black" },
+          fontFamily: { sans: ['"Segoe UI"','Tahoma','Geneva','Verdana','sans-serif'] },
+          keyframes: {
+            fadeInUp: {"0%": {opacity:"0",transform:"translateY(30px)"},"100%": {opacity:"1",transform:"translateY(0)"}},
+            zoomIn: {"0%": {opacity:"0",transform:"scale(0.8)"},"100%": {opacity:"1",transform:"scale(1)"}},
+            fadeInBody: {from:{opacity:"0"},to:{opacity:"1"}}
+          },
+          animation: { fadeInUp:"fadeInUp 1s ease forwards", zoomIn:"zoomIn 1s ease forwards", fadeInBody:"fadeInBody 1s ease-in" }
+        } }
       };
     </script>
     <style>
-      body {
-        background: linear-gradient(120deg, #e0f2fe 0%, #dbeafe 100%);
-        min-height: 100vh; display:flex; justify-content:center; align-items:center;
-      }
+      body { background: linear-gradient(120deg, #e0f2fe 0%, #dbeafe 100%); min-height: 100vh; display:flex; justify-content:center; align-items:center; }
       .whatsapp-btn { transition: all 0.3s ease; }
-      .whatsapp-btn:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 10px 25px rgba(30,64,175,0.3), 0 5px 10px rgba(14,165,233,0.2);
-      }
+      .whatsapp-btn:hover { transform: translateY(-3px); box-shadow: 0 10px 25px rgba(30,64,175,0.3), 0 5px 10px rgba(14,165,233,0.2); }
     </style>
   </head>
   <body class="bg-white text-black font-sans overflow-x-hidden min-h-screen flex justify-center items-start animate-fadeInBody">
@@ -372,6 +346,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
             KeyboardButton("🧪 Service Demos"),
         ],
         [KeyboardButton("📢 Join Channel"), KeyboardButton("🌐 Follow Us")],
+        [KeyboardButton("❌ Cancel")],  # quick escape from any flow
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
@@ -388,7 +363,7 @@ def footer_inline_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("☎️ Contact", callback_data="FOOTER:contact"),
             ],
             [
-                InlineKeyboardButton("📞 Direct Call (Sales)", url="tel:+91 8982285510"),
+                InlineKeyboardButton("📞 Direct Call (Sales)", url="tel:+918982285510"),
             ],
         ]
     )
@@ -609,7 +584,7 @@ async def start_post_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["post"] = {}
     crm_log(update.effective_user, "create_post_start", "post")
     await update.message.reply_text(
-        "🖼️ *Create a Post*\nPlease send me the *image/photo* you want to use.",
+        "🖼️ *Create a Post*\nPlease send me the *image/photo* you want to use.\n(You can /cancel anytime.)",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard(),
     )
@@ -697,7 +672,7 @@ async def start_lp_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["lp"] = {}
     crm_log(update.effective_user, "lp_start", "landing_page")
     await update.message.reply_text(
-        "🧩 *Landing Page Wizard*\nStep 1/6 — Send *Landing Page / Brand Name*.",
+        "🧩 *Landing Page Wizard*\nStep 1/6 — Send *Landing Page / Brand Name*.\n(You can /cancel anytime.)",
         parse_mode="Markdown",
         reply_markup=main_menu_keyboard(),
     )
@@ -751,29 +726,27 @@ async def lp_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
         {"color": context.user_data["lp"]["color"]},
     )
     await update.message.reply_text(
-        "Step 5/6 — Send *Logo*: \n• Either upload a *photo*,\n• Or send a direct *logo URL*,\n• Or type 'skip'.",
+        "Step 5/6 — Send *Logo*: \n• Upload a *photo*, or\n• Send a direct *logo URL*, or\n• Type *skip*.",
         parse_mode="Markdown",
     )
     return LP_LOGO_PROMPT
 
 
+# NOTE: we handle only valid inputs here via filters (see wiring below)
 async def lp_logo_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text and text.lower().strip() == "skip":
+    text = (update.message.text or "").strip()
+
+    if text.lower() == "skip":
         context.user_data["lp"]["logo_url"] = "logo.jpg"
         return await lp_logo_done(update, context)
 
-    if text and re.match(r"^https?://", text.strip()):
-        context.user_data["lp"]["logo_url"] = text.strip()
+    if text.lower().startswith("http://") or text.lower().startswith("https://"):
+        context.user_data["lp"]["logo_url"] = text
         return await lp_logo_done(update, context)
 
-    if update.message.photo:
-        context.user_data["lp"]["_await_photo"] = True
-        await update.message.reply_text("✅ Photo received, processing...")
-        return LP_LOGO_DATA
-
     await update.message.reply_text(
-        "Please upload a *photo*, send *URL*, or type 'skip'.", parse_mode="Markdown"
+        "Please upload a *photo*, send a direct *logo URL*, or type *skip*.",
+        parse_mode="Markdown",
     )
     return LP_LOGO_PROMPT
 
@@ -947,7 +920,7 @@ async def footer_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Start / Generic
+# Start / Cancel / Generic
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome = dedent(
@@ -963,10 +936,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     crm_log(update.effective_user, "start", "session")
 
 
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await (update.message or update.callback_query.message).reply_text(
+        "❌ Flow cancelled.", reply_markup=main_menu_keyboard()
+    )
+    crm_log(update.effective_user, "cancel", "flow")
+    return ConversationHandler.END
+
+
 async def generic_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     # Menu routing
+    if text == "❌ Cancel":
+        await cancel(update, context)
+        return
     if text == "🔄 Start":
         await start(update, context)
         return
@@ -1001,34 +985,37 @@ def app():
     if not BOT_TOKEN:
         raise SystemExit("Please set BOT_TOKEN in .env")
 
-    # init sheets once on boot
     _init_sheets()
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # /start
+    # /start & /cancel
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("cancel", cancel))
 
-    # Create Post
+    # Create Post conversation
     post_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^🖼️ Create a Post$"), start_post_flow)
         ],
         states={
-            CREATE_POST_IMAGE: [
-                MessageHandler(filters.PHOTO & ~filters.COMMAND, receive_post_image)
-            ],
+            # accept only photos at the first step
+            CREATE_POST_IMAGE: [MessageHandler(filters.PHOTO, receive_post_image)],
             CREATE_POST_LINK: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_post_link)
             ],
         },
-        fallbacks=[CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("start", start),
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.Regex("^❌ Cancel$"), cancel),
+        ],
         name="create_post",
         persistent=False,
     )
     application.add_handler(post_conv)
 
-    # Landing Page
+    # Landing Page conversation (fixed filters at logo step)
     lp_conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^🧩 Create a Landing Page$"), start_lp_flow)
@@ -1038,19 +1025,22 @@ def app():
             LP_SUB: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_sub)],
             LP_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_desc)],
             LP_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_color)],
+            # Only accept: photo, 'skip', or URL at the logo prompt
             LP_LOGO_PROMPT: [
-                MessageHandler(
-                    (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, lp_logo_prompt
-                ),
+                MessageHandler(filters.PHOTO, lp_logo_data),
+                MessageHandler(filters.Regex(r"(?i)^skip$"), lp_logo_prompt),
+                MessageHandler(filters.Regex(r"(?i)^https?://\S+$"), lp_logo_prompt),
             ],
-            LP_LOGO_DATA: [
-                MessageHandler(filters.PHOTO & ~filters.COMMAND, lp_logo_data),
-            ],
+            LP_LOGO_DATA: [MessageHandler(filters.PHOTO, lp_logo_data)],
             LP_CONFIRM: [
                 CallbackQueryHandler(lp_confirm_cb, pattern=r"^LP:(PAID|EDIT|CANCEL)$")
             ],
         },
-        fallbacks=[CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("start", start),
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.Regex("^❌ Cancel$"), cancel),
+        ],
         name="landing_page",
         persistent=False,
     )
@@ -1141,7 +1131,7 @@ def app():
         )
     )
 
-    # Generic Q&A
+    # Generic Q&A (fallback)
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, generic_query)
     )
