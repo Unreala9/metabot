@@ -84,8 +84,8 @@ VIDEO_DEMOS = [
     "https://drive.google.com/file/d/VIDEO_DEMO_2/view",
 ]
 WEBSITE_DEMOS = [
-    "https://portfolio.metabulluniverse.com/demo-site-1",
-    "https://portfolio.metabulluniverse.com/demo-site-2",
+    "https://portfolio.metabulluniverse.com",
+    "https://metabulluniverse.com",
 ]
 ADS_LINKS = [
     "https://www.instagram.com/p/AD_DEMO_1/",
@@ -794,9 +794,10 @@ async def demos_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    def render_list(title: str, urls: List[str]) -> str:
+    def render_list(title: str, urls: list[str]) -> str:
         if not urls:
             return f"{title}\n(Coming soon)"
+        # plain text so no Markdown parsing can fail
         return title + "\n" + "\n".join([f"• {u}" for u in urls])
 
     if q.data == "DEMOS:video":
@@ -812,6 +813,7 @@ async def demos_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "Demo option not recognized."
         tag = "demos_unknown"
 
+    # No parse_mode; also disables previews to keep chat clean
     await q.message.reply_text(
         text, disable_web_page_preview=True, reply_markup=footer_inline_keyboard()
     )
