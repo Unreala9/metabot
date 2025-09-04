@@ -455,40 +455,153 @@ def safe_html(s: str) -> str:
 def build_landing_html(
     name: str, sub: str, desc: str, color: str, logo_filename: Optional[str]
 ) -> bytes:
-    brand = safe_html(name)
-    subh = safe_html(sub)
-    descr = safe_html(desc)
+    """
+    Renders a landing page that visually matches the provided Crypto Bazaar sample.
+    - Uses Tailwind CDN + custom keyframes (fadeInUp, zoomIn, fadeInBody).
+    - Dark radial background, gradient heading, animated CTA, disclaimer.
+    - CTA links to COMPANY_CHANNEL_URL if present, else SOCIALS['Telegram'].
+    - `color` drives the primary gradient; secondary is a deeper shade fallback.
+    """
+    brand = safe_html(name or "Your Brand")
+    subh = safe_html(sub or "Expert insights. Real-time updates.")
+    descr = safe_html(
+        desc
+        or "We share content for informational and educational purposes only—this is not financial or investment advice. "
+        "Trading carries risk; always do your own research."
+    )
+
+    # Primary color from args; secondary is a safe, deeper fallback if you don't want to compute shades.
     primary = color if color.startswith("#") else f"#{color}"
+    secondary = "#be185d"  # deep fuchsia/pink fallback (matches your sample)
+    accent = "#0891b2"  # cyan accent (matches your sample)
+
+    cta_url = COMPANY_CHANNEL_URL or SOCIALS.get("Telegram", "#")
+    meta_pixel_id = os.getenv("META_PIXEL_ID", "").strip()
+
+    # If a logo file was uploaded, embed <img>. We ship it separately when zipping.
     logo_tag = ""
     if logo_filename:
-        logo_tag = '<img src="logo.png" alt="Logo" style="height:64px;width:auto;display:block;margin:0 auto 16px;" />'
-    html = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>{brand}</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet" />
-<style>
-:root{{--primary:{primary};--bg:#F6F1E9;--text:#09122C}}
-*{{box-sizing:border-box}}body{{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text)}}
-.wrap{{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}}
-.card{{width:min(920px,100%);background:#fff;border-radius:24px;padding:32px;box-shadow:0 10px 30px rgba(0,0,0,.08)}}
-.brand{{text-align:center}}.brand h1{{margin:0 0 8px;font-size:clamp(28px,5vw,44px)}}
-.brand p.sub{{margin:0 0 16px;opacity:.8;font-size:clamp(14px,3.3vw,18px)}}
-.cta{{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:24px}}
-.btn{{padding:12px 16px;border-radius:999px;border:2px solid var(--primary);color:#fff;background:var(--primary);text-decoration:none;font-weight:600}}
-.btn.alt{{background:#fff;color:var(--primary)}}.hr{{height:2px;background:linear-gradient(90deg,var(--primary),transparent);margin:24px 0}}
-.desc{{font-size:16px;line-height:1.7}}footer{{text-align:center;margin-top:24px;opacity:.7;font-size:14px}}
-</style></head>
-<body><div class="wrap"><div class="card"><div class="brand">
-{logo_tag}
-<h1>{brand}</h1><p class="sub">{subh}</p>
-<div class="cta">
-  <a href="https://wa.me/918982285510" class="btn">📞 Call/WhatsApp</a>
-  <a href="mailto:{COMPANY['email']}" class="btn alt">✉️ Email Us</a>
-  <a href="{COMPANY['gmap_url']}" class="btn alt">📍 Find Us</a>
-</div>
-</div><div class="hr"></div><div class="desc">{descr}</div>
-<footer>© {COMPANY['name']} — {COMPANY['type']}</footer>
-</div></div></body></html>"""
+        logo_tag = (
+            '<img src="logo.png" alt="Brand Logo" '
+            'class="w-4/5 max-w-[400px] md:max-w-[300px] rounded-xl mx-auto mb-5 mt-8 '
+            'shadow-[0_10px_30px_rgba(225,29,72,0.3)] opacity-0 animate-[zoomIn_1s_ease_forwards] [animation-delay:1s]" />'
+        )
+
+    # Optional Meta Pixel
+    meta_pixel = ""
+    if meta_pixel_id:
+        meta_pixel = f"""
+<!-- Meta Pixel Code -->
+<script>
+!function(f,b,e,v,n,t,s)
+{{if(f.fbq)return;n=f.fbq=function(){{n.callMethod?
+n.callMethod.apply(n,arguments):n.queue.push(arguments)}};
+if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+n.queue=[];t=b.createElement(e);t.async=!0;
+t.src=v;s=b.getElementsByTagName(e)[0];
+s.parentNode.insertBefore(t,s)}}(window, document,'script',
+'https://connect.facebook.net/en_US/fbevents.js');
+fbq('init', '{meta_pixel_id}');
+fbq('track', 'PageView');
+</script>
+<noscript><img height="1" width="1" style="display:none"
+src="https://www.facebook.com/tr?id={meta_pixel_id}&ev=PageView&noscript=1"
+/></noscript>
+<!-- End Meta Pixel Code -->
+"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>{brand} | Expert Insights</title>
+
+    <meta name="description" content="{subh}"/>
+    <meta name="keywords" content="{brand}, Trading, Tips, Crypto, Forex, Market Analysis, Investing, Nifty, BankNifty"/>
+    <meta name="author" content="{brand}" />
+    <meta name="robots" content="index, follow" />
+    <link rel="canonical" href="{cta_url}" />
+
+    <meta property="og:title" content="{brand} - Expert Market Insights" />
+    <meta property="og:description" content="{subh}"/>
+    <meta property="og:image" content="logo.png" />
+    <meta property="og:url" content="{cta_url}" />
+    <meta property="og:type" content="website" />
+
+    <link rel="icon" href="logo.png" type="image/png" />
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {{
+        theme: {{
+          extend: {{
+            colors: {{
+              primary: "{primary}",
+              secondary: "{secondary}",
+              accent: "{accent}",
+              light: "#f0f3f4",
+            }},
+            fontFamily: {{
+              sans: ['"Segoe UI"', "Tahoma", "Geneva", "Verdana", "sans-serif"],
+            }},
+            keyframes: {{
+              fadeInUp: {{
+                "0%": {{ opacity: "0", transform: "translateY(30px)" }},
+                "100%": {{ opacity: "1", transform: "translateY(0)" }},
+              }},
+              zoomIn: {{
+                "0%": {{ opacity: "0", transform: "scale(0.8)" }},
+                "100%": {{ opacity: "1", transform: "scale(1)" }},
+              }},
+              fadeInBody: {{
+                from: {{ opacity: "0" }},
+                to: {{ opacity: "1" }},
+              }},
+            }},
+            animation: {{
+              fadeInUp: "fadeInUp 1s ease forwards",
+              zoomIn: "zoomIn 1s ease forwards",
+              fadeInBody: "fadeInBody 1s ease-in",
+            }},
+          }},
+        }},
+      }};
+    </script>
+    {meta_pixel}
+  </head>
+  <body class="bg-[radial-gradient(circle_at_center,_#1f2937,_#111827,_#000000)] text-light font-sans overflow-x-hidden min-h-screen flex justify-center items-start animate-[fadeInBody_0.6s_ease-in]">
+    <div class="w-full max-w-7xl p-4 animate-[fadeInUp_1s_ease_forwards]">
+      <section class="text-center p-2 opacity-0 animate-[fadeInUp_1s_ease_forwards] [animation-delay:0.8s]">
+        {logo_tag}
+        <h2 class="text-3xl md:text-3xl mb-4 font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent opacity-0 animate-[fadeInUp_1s_ease_forwards] [animation-delay:1.2s]">
+          {brand}
+        </h2>
+
+        <p class="md:text-lg text-xl leading-relaxed max-w-[680px] mx-auto mb-6 opacity-0 animate-[fadeInUp_1s_ease_forwards] [animation-delay:1.4s]">
+          {subh}<br/>
+          {descr}
+        </p>
+
+        <a href="{cta_url}" target="_blank"
+           class="relative bg-gradient-to-r from-primary to-accent text-white py-4 px-8 rounded-full font-bold text-lg transition-all duration-300 ease-in-out inline-block opacity-0 animate-[zoomIn_1s_ease_forwards] [animation-delay:1.6s] hover:-translate-y-1 shadow-[0_8px_20px_rgba(0,0,0,0.4),_0_0_20px_rgba(225,29,72,0.4)] hover:shadow-[0_12px_30px_rgba(0,0,0,0.5),_0_0_30px_rgba(225,29,72,0.6)] hover:scale-105"
+           onclick="window.fbq && fbq('trackCustom','JoinTelegramClick')">
+          <i class="fab fa-telegram mr-3 text-xl"></i>
+          <span class="relative z-10">Join Telegram Channel</span>
+          <span class="absolute inset-0 animate-pulse bg-white opacity-20 rounded-full"></span>
+        </a>
+
+        <p class="text-[12px] leading-relaxed max-w-[700px] mx-auto mt-8 opacity-0 animate-[fadeInUp_1s_ease_forwards] [animation-delay:1.8s]">
+          <strong>Disclaimer:</strong>
+          This channel/page shares content for informational and educational purposes only — this is not financial or investment advice.
+          Trading (stocks/crypto/forex) carries high risk; always do your own research and consult a professional before investing.
+          The channel and admins are not responsible for any losses.
+        </p>
+      </section>
+    </div>
+  </body>
+</html>"""
     return html.encode("utf-8")
 
 
