@@ -1,11 +1,5 @@
 # bot.py
-# Metabull Universe Telegram Bot
-# - Auto-cancel flow switching
-# - Gemini fallback (optional)
-# - Landing Page with inline base64 logo (single .html)
-# - Robust inline suggestion buttons (SG::topic)
-# - Safe HTML outputs + error handler
-#
+# Metabull Universe Telegram Bot (env-based, auto-cancel flow switching + Gemini fallback + inline-logo HTML)
 # Python 3.10+ | python-telegram-bot==20.7
 
 import asyncio
@@ -59,7 +53,7 @@ SOCIAL_DISCORD = os.getenv("SOCIAL_DISCORD", "")  # optional
 GSHEET_ID = os.getenv("GSHEET_ID", "").strip()  # full URL or plain id
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
-# Gemini fallback (optional)
+# Gemini fallback
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro").strip()
 
@@ -382,7 +376,7 @@ def answer_for_class(topic: str) -> str:
     if topic == "ads":
         return (
             "<b>Ads & Performance</b>\n"
-            "• Meta &amp; Google Ads, creative + media planning\n"
+            "• Meta & Google Ads, creative + media planning\n"
             "• Budget-aligned strategy & reporting\n"
             "• Pricing depends on budget & scope"
         )
@@ -394,7 +388,7 @@ def answer_for_class(topic: str) -> str:
             "• Calendar & analytics included"
         )
     if topic == "founder":
-        return f"<b>Founder &amp; CEO</b>\n{COMPANY['founder']}"
+        return f"<b>Founder & CEO</b>\n{COMPANY['founder']}"
     if topic == "clients":
         return f"<b>Active Clients</b>\n{COMPANY['active_clients']}"
     if topic == "employees":
@@ -418,7 +412,7 @@ async def send_with_quick_actions(
     chat_id = update.effective_chat.id
     await context.bot.send_message(
         chat_id=chat_id,
-        text=safe_html(text),
+        text=text,
         reply_markup=quick_actions_markup(),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
@@ -463,8 +457,8 @@ def build_landing_html(
     name: str, sub: str, desc: str, color: str, logo_filename: Optional[str]
 ) -> bytes:
     """
-    Renders a landing page (Crypto Bazaar style).
-    If logo is provided, it is embedded inline as a base64 data-URI -> single .html file contains the image.
+    Renders a landing page matching the Crypto Bazaar style.
+    If logo is provided, it is embedded inline as a base64 data-URI -> single .html file works everywhere.
     """
     brand = safe_html(name or "Your Brand")
     subh = safe_html(sub or "Expert insights. Real-time updates.")
@@ -907,6 +901,17 @@ async def cp_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---- Create Landing Page ----
+async def create_landing_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    set_flow(context, "lp")
+    context.user_data["lp"] = {}
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="🧱 <b>Create a Landing Page</b>\nSend the <b>Landing Page Name</b> (Brand/Title).\n\n(At any time, ask a normal question and I’ll switch to Q&A.)",
+        parse_mode=ParseMode.HTML,
+    )
+    return LP_NAME
+
+
 async def _save_image_from_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> Optional[str]:
@@ -931,17 +936,6 @@ async def _save_image_from_message(
     filename = f"uploads/logo_{update.effective_user.id}_{int(time.time())}{ext}"
     await tg_file.download_to_drive(filename)
     return filename
-
-
-async def create_landing_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_flow(context, "lp")
-    context.user_data["lp"] = {}
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="🧱 <b>Create a Landing Page</b>\nSend the <b>Landing Page Name</b> (Brand/Title).\n\n(At any time, ask a normal question and I’ll switch to Q&A.)",
-        parse_mode=ParseMode.HTML,
-    )
-    return LP_NAME
 
 
 async def lp_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1123,9 +1117,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = mapping.get(key, "services")
         txt = answer_for_class(topic)
         await q.message.reply_text(
-            safe_html(txt),
-            parse_mode=ParseMode.HTML,
-            reply_markup=quick_actions_markup(),
+            txt, parse_mode=ParseMode.HTML, reply_markup=quick_actions_markup()
         )
         sugg = get_followups_for_topic(topic)
         if sugg:
@@ -1138,9 +1130,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         topic = data.split("::", 1)[1] or "services"
         ans = answer_for_class(topic)
         await q.message.reply_text(
-            safe_html(ans),
-            parse_mode=ParseMode.HTML,
-            reply_markup=quick_actions_markup(),
+            ans, parse_mode=ParseMode.HTML, reply_markup=quick_actions_markup()
         )
         sugg = get_followups_for_topic(topic)
         if sugg:
@@ -1216,7 +1206,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_with_quick_actions(
         update,
         context,
-        gem_text,
+        safe_html(gem_text),
         suggestions=get_followups_for_topic("services"),
         topic_key="services",
     )
@@ -1249,29 +1239,6 @@ async def cancel_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
-# ---- Error handler (shows errors in chat + logs) ----
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        raise context.error
-    except Exception as e:
-        chat_id = None
-        try:
-            if isinstance(update, Update) and update.effective_chat:
-                chat_id = update.effective_chat.id
-        except Exception:
-            pass
-        if chat_id:
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"⚠️ Oops! I hit an error while handling that.\n<code>{safe_html(str(e))}</code>",
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception:
-                pass
-        print("ERROR:", repr(e))
-
-
 # ---- Bootstrap ----
 def main():
     if not BOT_TOKEN:
@@ -1279,7 +1246,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(on_callback))  # keep before convos
+    app.add_handler(CallbackQueryHandler(on_callback))
 
     # Create Post convo
     cp_conv = ConversationHandler(
@@ -1361,9 +1328,6 @@ def main():
 
     # Generic text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
-    # Error handler
-    app.add_error_handler(on_error)
 
     print("✅ Metabull Universe bot is running...")
     app.run_polling(close_loop=False)
