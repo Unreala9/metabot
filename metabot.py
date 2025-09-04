@@ -158,8 +158,8 @@ PRICING = {
 
 DEMO_LINKS = {
     "Websites": [
-        ("Agency Site Demo", "https://metabulluniverse.com"),
-        ("Portfolio Demo", "https://portfolio.metabulluniverse.com"),
+        ("Agency Site Demo", "https://example.com/demo/website-1"),
+        ("Portfolio Demo", "https://example.com/demo/website-2"),
     ],
     "Videos (Drive)": [
         ("Ad Reels", "https://drive.google.com/"),
