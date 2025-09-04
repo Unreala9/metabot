@@ -345,7 +345,7 @@ def classify(text: str) -> Tuple[str, List[str], int]:
 
 def answer_for_class(topic: str) -> str:
     if topic == "services":
-        return "<b>Our Services</b>\n" + list_to_bullets(SERVICES)
+        return "<b>Our Services</b>\n" + list_to_bullets(SERVICES).replace("&", "&amp;")
     if topic == "pricing":
         txt = "<b>Pricing Overview</b>\n\n" + pricing_to_text()
         if UPI_ID:
@@ -381,8 +381,8 @@ def answer_for_class(topic: str) -> str:
         )
     if topic == "ads":
         return (
-            "<b>Ads & Google Performance</b>\n"
-            "• Meta & Google Ads, creative + media planning\n"
+            "<b>Ads & Performance</b>\n"
+            "• Meta &amp; Google Ads, creative + media planning\n"
             "• Budget-aligned strategy & reporting\n"
             "• Pricing depends on budget & scope"
         )
@@ -394,7 +394,7 @@ def answer_for_class(topic: str) -> str:
             "• Calendar & analytics included"
         )
     if topic == "founder":
-        return f"<b>Founder & CEO</b>\n{COMPANY['founder']}"
+        return f"<b>Founder &amp; CEO</b>\n{COMPANY['founder']}"
     if topic == "clients":
         return f"<b>Active Clients</b>\n{COMPANY['active_clients']}"
     if topic == "employees":
@@ -844,7 +844,9 @@ async def cp_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for u in urls:
         buttons.append([InlineKeyboardButton("🌐 Website", url=u)])
     for p in phones:
-        buttons.append([InlineKeyboardButton("📞 Call", url=f"tel:{p}")])
+        buttons.append(
+            [InlineKeyboardButton("📞 Call", url=f"https://wa.me/{p.lstrip('+')}")]
+        )
     for e in emails:
         buttons.append([InlineKeyboardButton("✉️ Email", url=f"mailto:{e}")])
 
@@ -1108,6 +1110,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     await q.answer()
+    # print("Callback:", data)
 
     if data.startswith("QA_"):
         key = data[3:]
@@ -1319,9 +1322,7 @@ def main():
                 MessageHandler(filters.ALL, cancel_and_forward),
             ],
             LP_LOGO: [
-                MessageHandler(
-                    (filters.PHOTO | filters.Document.ALL), lp_logo
-                ),  # handle all docs; check mime inside
+                MessageHandler((filters.PHOTO | filters.Document.IMAGE), lp_logo),
                 CommandHandler("skip", lp_skip_logo),
                 MessageHandler(filters.ALL, cancel_and_forward),
             ],
