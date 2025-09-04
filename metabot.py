@@ -20,7 +20,6 @@ from io import BytesIO
 from typing import Dict, List, Tuple, Optional
 
 from dotenv import load_dotenv
-
 load_dotenv()
 
 from telegram import (
@@ -159,8 +158,8 @@ PRICING = {
 
 DEMO_LINKS = {
     "Websites": [
-        ("Agency Site Demo", "https://example.com/demo/website-1"),
-        ("Portfolio Demo", "https://example.com/demo/website-2"),
+        ("Agency Site Demo", "https://metabulluniverse.com"),
+        ("Portfolio Demo", "https://portfolio.metabulluniverse.com"),
     ],
     "Videos (Drive)": [
         ("Ad Reels", "https://drive.google.com/"),
@@ -185,11 +184,9 @@ SOCIALS = {
 MAIN_MENU = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton("🔄 Start"), KeyboardButton("🖼️ Create a Post")],
-        [
-            KeyboardButton("🧱 Create a Landing Page"),
-            KeyboardButton("🎬 Service Demos"),
-        ],
-        [KeyboardButton("💼 Pricing"), KeyboardButton("📣 Follow Us")],
+        [KeyboardButton("🧱 Create a Landing Page"), KeyboardButton("🎬 Service Demos")],
+        [KeyboardButton("🧰 Services"), KeyboardButton("💼 Pricing")],
+        [KeyboardButton("📣 Follow Us"), KeyboardButton("❌ Cancel")],
     ],
     resize_keyboard=True,
     one_time_keyboard=False,
@@ -208,22 +205,21 @@ def quick_actions_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("✉️ Contact", callback_data="QA_CONTACT"),
         ],
         [InlineKeyboardButton("📞 Call Sales (WhatsApp)", url=SOCIALS["WhatsApp"])],
+        [InlineKeyboardButton("❌ Cancel", callback_data="QA_CANCEL")],  # NEW inline cancel
     ]
     if COMPANY_CHANNEL_URL:
-        rows.append(
-            [InlineKeyboardButton("📣 Join Our Channel", url=COMPANY_CHANNEL_URL)]
-        )
+        rows.append([InlineKeyboardButton("📣 Join Our Channel", url=COMPANY_CHANNEL_URL)])
     return InlineKeyboardMarkup(rows)
 
 
 def suggestion_markup(labels: List[str], topic_key: str) -> InlineKeyboardMarkup:
-    # compact callback tokens -> reliable
     rows = [
         [InlineKeyboardButton(f"❓ {label}", callback_data=f"SG::{topic_key}")]
         for label in labels[:6]
     ]
+    # add a cancel line at the bottom for convenience
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="QA_CANCEL")])
     return InlineKeyboardMarkup(rows)
-
 
 # ---------------- Local persistence ----------------
 USER_DATA_FILE = "user_data.json"
@@ -345,7 +341,7 @@ def classify(text: str) -> Tuple[str, List[str], int]:
 
 def answer_for_class(topic: str) -> str:
     if topic == "services":
-        return "<b>Our Services</b>\n" + list_to_bullets(SERVICES).replace("&", "&amp;")
+        return "<b>Our Services</b>\n" + list_to_bullets(SERVICES)
     if topic == "pricing":
         txt = "<b>Pricing Overview</b>\n\n" + pricing_to_text()
         if UPI_ID:
@@ -354,9 +350,7 @@ def answer_for_class(topic: str) -> str:
     if topic == "location":
         return f"<b>Our Location</b>\n{COMPANY['hq']}\n\n<a href=\"{COMPANY['gmap_url']}\">Open in Google Maps</a>"
     if topic == "contact":
-        return (
-            f"<b>Contact Us</b>\nEmail: {COMPANY['email']}\nPhone: {COMPANY['phone']}"
-        )
+        return f"<b>Contact Us</b>\nEmail: {COMPANY['email']}\nPhone: {COMPANY['phone']}"
     if topic == "web":
         return (
             "<b>Web Development</b>\n"
@@ -381,8 +375,8 @@ def answer_for_class(topic: str) -> str:
         )
     if topic == "ads":
         return (
-            "<b>Ads & Performance</b>\n"
-            "• Meta &amp; Google Ads, creative + media planning\n"
+            "<b>Ads & Google Performance</b>\n"
+            "• Meta & Google Ads, creative + media planning\n"
             "• Budget-aligned strategy & reporting\n"
             "• Pricing depends on budget & scope"
         )
@@ -394,7 +388,7 @@ def answer_for_class(topic: str) -> str:
             "• Calendar & analytics included"
         )
     if topic == "founder":
-        return f"<b>Founder &amp; CEO</b>\n{COMPANY['founder']}"
+        return f"<b>Founder & CEO</b>\n{COMPANY['founder']}"
     if topic == "clients":
         return f"<b>Active Clients</b>\n{COMPANY['active_clients']}"
     if topic == "employees":
@@ -462,15 +456,10 @@ def _file_to_data_uri(path: str) -> Optional[str]:
 def build_landing_html(
     name: str, sub: str, desc: str, color: str, logo_filename: Optional[str]
 ) -> bytes:
-    """
-    Renders a landing page (Crypto Bazaar style).
-    If logo is provided, it is embedded inline as a base64 data-URI -> single .html file contains the image.
-    """
     brand = safe_html(name or "Your Brand")
     subh = safe_html(sub or "Expert insights. Real-time updates.")
     descr = safe_html(
-        desc
-        or "We share educational content only; not financial advice. Do your own research."
+        desc or "We share educational content only; not financial advice. Do your own research."
     )
 
     primary = color if color.startswith("#") else f"#{color}"
@@ -479,7 +468,6 @@ def build_landing_html(
 
     cta_url = COMPANY_CHANNEL_URL or SOCIALS.get("Telegram", "#")
 
-    # Optional Meta Pixel
     meta_pixel = ""
     if META_PIXEL_ID:
         meta_pixel = f"""
@@ -502,7 +490,6 @@ src="https://www.facebook.com/tr?id={META_PIXEL_ID}&ev=PageView&noscript=1"
 <!-- End Meta Pixel Code -->
 """
 
-    # Inline logo (if any)
     logo_img_tag = ""
     favicon_href = ""
     og_image = ""
@@ -619,13 +606,11 @@ def gen_desc_from_niche(niche: str) -> str:
         f"{COMPANY['name']} crafts everything end-to-end. Book a free consultation today."
     )
 
-
 # ---------------- Gemini Fallback ----------------
 _gemini_ready = False
 try:
     if GEMINI_API_KEY:
         import google.generativeai as genai  # pip install google-generativeai
-
         genai.configure(api_key=GEMINI_API_KEY)
         _gemini_ready = True
 except Exception:
@@ -648,8 +633,7 @@ async def gemini_answer(query: str) -> Optional[str]:
     kb = _read_file("knowledgebase.txt")
     cmds = _read_file("llm_commands.txt")
 
-    system_prompt = textwrap.dedent(
-        f"""
+    system_prompt = textwrap.dedent(f"""
     You are Metabull Universe assistant. Answer crisply in Hinglish (English+Hindi).
     Use the given Knowledge Base and Commands if relevant. If something isn't in KB,
     give best helpful answer without fabricating company facts.
@@ -662,17 +646,14 @@ async def gemini_answer(query: str) -> Optional[str]:
 
     Company quick facts:
     Name: {COMPANY['name']}; Type: {COMPANY['type']}; Email: {COMPANY['email']}; Phone: {COMPANY['phone']}; HQ: {COMPANY['hq']}.
-    """
-    )
+    """)
 
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         resp = await asyncio.to_thread(
             model.generate_content,
-            [
-                {"role": "user", "parts": [system_prompt]},
-                {"role": "user", "parts": [query]},
-            ],
+            [{"role": "user", "parts": [system_prompt]},
+             {"role": "user", "parts": [query]}],
         )
         text = getattr(resp, "text", "") or ""
         return text.strip() or None
@@ -699,17 +680,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def show_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    set_flow(context, None)
+    txt = answer_for_class("services")
+    await send_with_quick_actions(
+        update, context, txt, suggestions=get_followups_for_topic("services"), topic_key="services"
+    )
+
+
 async def show_pricing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_flow(context, None)
     await send_with_quick_actions(
-        update,
-        context,
-        "<b>Pricing Overview</b>\n\n" + pricing_to_text(),
-        suggestions=[
-            "Do you offer bundles?",
-            "Any bulk discount?",
-            "Timeline for delivery?",
-        ],
+        update, context, "<b>Pricing Overview</b>\n\n" + pricing_to_text(),
+        suggestions=["Do you offer bundles?", "Any bulk discount?", "Timeline for delivery?"],
         topic_key="pricing",
     )
 
@@ -747,9 +730,7 @@ async def show_service_demos(update: Update, context: ContextTypes.DEFAULT_TYPE)
             lines.append(f"• {label}")
             buttons.append([InlineKeyboardButton(f"🔗 {label}", url=url)])
     if COMPANY_CHANNEL_URL:
-        buttons.append(
-            [InlineKeyboardButton("📣 Join Our Channel", url=COMPANY_CHANNEL_URL)]
-        )
+        buttons.append([InlineKeyboardButton("📣 Join Our Channel", url=COMPANY_CHANNEL_URL)])
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text="\n".join(lines),
@@ -765,7 +746,7 @@ async def create_post_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["create_post"] = {}
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="🖼️ <b>Create a Post</b>\nSend me an <b>image</b> to use, or type /skip to continue without an image.\n\n(At any time, ask a normal question and I’ll switch to Q&A.)",
+        text="🖼️ <b>Create a Post</b>\nSend me an <b>image</b> to use, or type /skip to continue without an image.\n\n(You can tap ❌ Cancel anytime.)",
         parse_mode=ParseMode.HTML,
     )
     return CP_IMAGE
@@ -812,10 +793,8 @@ async def cp_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["create_post"]["caption"] = caption.strip()
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text=(
-            "Great! Now send any <b>links / phone / emails</b> to attach as buttons.\n"
-            "Examples:\n• https://yourwebsite.com\n• +91 9876543210\n• you@example.com\n\nYou can send multiple in one message."
-        ),
+        text=("Great! Now send any <b>links / phone / emails</b> to attach as buttons.\n"
+              "Examples:\n• https://yourwebsite.com\n• +91 9876543210\n• you@example.com\n\nYou can send multiple in one message."),
         parse_mode=ParseMode.HTML,
     )
     return CP_LINKS
@@ -834,19 +813,13 @@ async def cp_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     text = update.message.text or ""
     urls, phones, emails = extract_links(text)
-    context.user_data["create_post"]["links"] = {
-        "urls": urls,
-        "phones": phones,
-        "emails": emails,
-    }
+    context.user_data["create_post"]["links"] = {"urls": urls, "phones": phones, "emails": emails}
 
     buttons = []
     for u in urls:
         buttons.append([InlineKeyboardButton("🌐 Website", url=u)])
     for p in phones:
-        buttons.append(
-            [InlineKeyboardButton("📞 Call", url=f"https://wa.me/{p.lstrip('+')}")]
-        )
+        buttons.append([InlineKeyboardButton("📞 Call", url=f"tel:{p}")])
     for e in emails:
         buttons.append([InlineKeyboardButton("✉️ Email", url=f"mailto:{e}")])
 
@@ -856,15 +829,12 @@ async def cp_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if image_path:
         with open(image_path, "rb") as f:
             await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=f,
-                caption=cap,
+                chat_id=update.effective_chat.id, photo=f, caption=cap,
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
             )
     else:
         await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=cap or "Your post is ready.",
+            chat_id=update.effective_chat.id, text=cap or "Your post is ready.",
             reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
         )
 
@@ -877,52 +847,34 @@ async def cp_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if USE_SHEETS:
         try:
             SHEET_POSTS.append_row(
-                [
-                    int(time.time()),
-                    uid,
-                    cap,
-                    ", ".join(urls),
-                    ", ".join(phones),
-                    ", ".join(emails),
-                    image_path or "",
-                ],
+                [int(time.time()), uid, cap, ", ".join(urls), ", ".join(phones), ", ".join(emails), image_path or ""],
                 value_input_option="USER_ENTERED",
             )
         except Exception:
             pass
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id, text="✅ Post created! You can forward this."
-    )
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="✅ Post created! You can forward this.")
     set_flow(context, None)
     return ConversationHandler.END
 
 
 async def cp_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_flow(context, None)
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id, text="Create Post cancelled."
-    )
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Create Post cancelled.")
     return ConversationHandler.END
 
 
 # ---- Create Landing Page ----
-async def _save_image_from_message(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> Optional[str]:
-    """Supports both photo and image document."""
+async def _save_image_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[str]:
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
-    elif update.message.document and (
-        update.message.document.mime_type or ""
-    ).startswith("image/"):
+    elif update.message.document and (update.message.document.mime_type or "").startswith("image/"):
         file_id = update.message.document.file_id
     else:
         return None
 
     tg_file = await context.bot.get_file(file_id)
     os.makedirs("uploads", exist_ok=True)
-    # keep original extension if possible
     ext = ""
     if update.message.document and update.message.document.file_name:
         _, ext = os.path.splitext(update.message.document.file_name)
@@ -938,7 +890,7 @@ async def create_landing_entry(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["lp"] = {}
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="🧱 <b>Create a Landing Page</b>\nSend the <b>Landing Page Name</b> (Brand/Title).\n\n(At any time, ask a normal question and I’ll switch to Q&A.)",
+        text="🧱 <b>Create a Landing Page</b>\nSend the <b>Landing Page Name</b> (Brand/Title).\n\n(You can tap ❌ Cancel anytime.)",
         parse_mode=ParseMode.HTML,
     )
     return LP_NAME
@@ -963,14 +915,10 @@ async def lp_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if saved:
         context.user_data["lp"]["logo_path"] = saved
         await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="✅ Logo saved. Now send a <b>Sub-heading</b>.",
-            parse_mode=ParseMode.HTML,
+            chat_id=update.effective_chat.id, text="✅ Logo saved. Now send a <b>Sub-heading</b>.", parse_mode=ParseMode.HTML
         )
         return LP_SUB
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id, text="Please upload an image or type /skip."
-    )
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Please upload an image or type /skip.")
     return LP_LOGO
 
 
@@ -978,9 +926,7 @@ async def lp_skip_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_flow(context, "lp"):
         return ConversationHandler.END
     await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="No logo selected. Send a <b>Sub-heading</b>.",
-        parse_mode=ParseMode.HTML,
+        chat_id=update.effective_chat.id, text="No logo selected. Send a <b>Sub-heading</b>.", parse_mode=ParseMode.HTML
     )
     return LP_SUB
 
@@ -1002,8 +948,7 @@ async def lp_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     context.user_data["lp"]["desc"] = update.message.text.strip()
     await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Send a <b>Primary Color</b> (hex like #4300FF) for the theme.",
+        chat_id=update.effective_chat.id, text="Send a <b>Primary Color</b> (hex like #4300FF) for the theme.",
         parse_mode=ParseMode.HTML,
     )
     return LP_COLOR
@@ -1014,8 +959,7 @@ async def lp_skip_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     context.user_data["lp"]["desc"] = ""
     await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Okay. Send a <b>Primary Color</b> (hex like #4300FF) for the theme.",
+        chat_id=update.effective_chat.id, text="Okay. Send a <b>Primary Color</b> (hex like #4300FF) for the theme.",
         parse_mode=ParseMode.HTML,
     )
     return LP_COLOR
@@ -1026,10 +970,7 @@ async def lp_color(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     color = update.message.text.strip()
     if not re.match(r"^#?[0-9a-fA-F]{6}$", color):
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Please send a valid hex color, e.g., #4300FF",
-        )
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Please send a valid hex color, e.g., #4300FF")
         return LP_COLOR
     if not color.startswith("#"):
         color = "#" + color
@@ -1050,13 +991,9 @@ async def lp_niche(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not lp.get("desc"):
         lp["desc"] = gen_desc_from_niche(niche)
 
-    html_bytes = build_landing_html(
-        lp["name"], lp["sub"], lp["desc"], lp["color"], lp.get("logo_path")
-    )
+    html_bytes = build_landing_html(lp["name"], lp["sub"], lp["desc"], lp["color"], lp.get("logo_path"))
 
-    # ALWAYS send single HTML (logo inline) -> no zip needed
-    buf = BytesIO(html_bytes)
-    buf.seek(0)
+    buf = BytesIO(html_bytes); buf.seek(0)
     safe_name = re.sub(r"\W+", "_", lp["name"])
     await context.bot.send_document(
         chat_id=update.effective_chat.id,
@@ -1064,7 +1001,6 @@ async def lp_niche(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption="✅ Your landing page HTML is ready.",
     )
 
-    # Persist + Sheets
     all_users = load_user_data()
     uid = str(update.effective_user.id)
     all_users.setdefault(uid, {"posts": [], "landing_pages": [], "queries": []})
@@ -1074,33 +1010,21 @@ async def lp_niche(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if USE_SHEETS:
         try:
             SHEET_LP.append_row(
-                [
-                    int(time.time()),
-                    uid,
-                    lp.get("name", ""),
-                    lp.get("sub", ""),
-                    lp.get("desc", ""),
-                    lp.get("color", ""),
-                    lp.get("logo_path", ""),
-                ],
+                [int(time.time()), uid, lp.get("name",""), lp.get("sub",""), lp.get("desc",""),
+                 lp.get("color",""), lp.get("logo_path","")],
                 value_input_option="USER_ENTERED",
             )
         except Exception:
             pass
 
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Need edits? Run 🧱 Create a Landing Page again.",
-    )
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Need edits? Run 🧱 Create a Landing Page again.")
     set_flow(context, None)
     return ConversationHandler.END
 
 
 async def lp_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_flow(context, None)
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id, text="Create Landing Page cancelled."
-    )
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Create Landing Page cancelled.")
     return ConversationHandler.END
 
 
@@ -1110,43 +1034,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     await q.answer()
-    # print("Callback:", data)
+
+    if data == "QA_CANCEL":  # inline cancel
+        set_flow(context, None)
+        await q.message.reply_text("❌ Cancelled. You're back to normal chat.", reply_markup=MAIN_MENU)
+        return
 
     if data.startswith("QA_"):
         key = data[3:]
-        mapping = {
-            "SERVICES": "services",
-            "PRICING": "pricing",
-            "LOCATION": "location",
-            "CONTACT": "contact",
-        }
+        mapping = {"SERVICES": "services", "PRICING": "pricing", "LOCATION": "location", "CONTACT": "contact"}
         topic = mapping.get(key, "services")
         txt = answer_for_class(topic)
-        await q.message.reply_text(
-            safe_html(txt),
-            parse_mode=ParseMode.HTML,
-            reply_markup=quick_actions_markup(),
-        )
+        await q.message.reply_text(safe_html(txt), parse_mode=ParseMode.HTML, reply_markup=quick_actions_markup())
         sugg = get_followups_for_topic(topic)
         if sugg:
-            await q.message.reply_text(
-                "More you can ask:", reply_markup=suggestion_markup(sugg, topic)
-            )
+            await q.message.reply_text("More you can ask:", reply_markup=suggestion_markup(sugg, topic))
         return
 
     if data.startswith("SG::"):
         topic = data.split("::", 1)[1] or "services"
         ans = answer_for_class(topic)
-        await q.message.reply_text(
-            safe_html(ans),
-            parse_mode=ParseMode.HTML,
-            reply_markup=quick_actions_markup(),
-        )
+        await q.message.reply_text(safe_html(ans), parse_mode=ParseMode.HTML, reply_markup=quick_actions_markup())
         sugg = get_followups_for_topic(topic)
         if sugg:
-            await q.message.reply_text(
-                "More you can ask:", reply_markup=suggestion_markup(sugg, topic)
-            )
+            await q.message.reply_text("More you can ask:", reply_markup=suggestion_markup(sugg, topic))
         return
 
 
@@ -1154,18 +1065,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (update.message.text or "").strip()
 
-    if msg in {
-        "🔄 Start",
-        "🖼️ Create a Post",
-        "🧱 Create a Landing Page",
-        "🎬 Service Demos",
-        "💼 Pricing",
-        "📣 Follow Us",
-    }:
+    # bottom menu navigation (includes Cancel + Services)
+    if msg in {"🔄 Start","🖼️ Create a Post","🧱 Create a Landing Page","🎬 Service Demos","🧰 Services","💼 Pricing","📣 Follow Us","❌ Cancel"}:
         set_flow(context, None)
+
+    if msg == "❌ Cancel":
+        await update.message.reply_text("❌ Cancelled. You're back to normal chat.", reply_markup=MAIN_MENU)
+        return
 
     if msg == "🔄 Start":
         return await start(update, context)
+    if msg == "🧰 Services":
+        return await show_services(update, context)
     if msg == "🖼️ Create a Post":
         return await create_post_entry(update, context)
     if msg == "🧱 Create a Landing Page":
@@ -1177,32 +1088,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg == "📣 Follow Us":
         return await show_follow_us(update, context)
 
-    set_flow(context, None)
-
+    # normal Q&A
     topic, sugg, max_score = classify(msg)
 
     if max_score > 0:
         ans = answer_for_class(topic)
-        await send_with_quick_actions(
-            update, context, ans, suggestions=sugg, topic_key=topic
-        )
+        await send_with_quick_actions(update, context, ans, suggestions=sugg, topic_key=topic)
         # logging
-        context.user_data.setdefault("history", []).append(
-            {"q": msg, "topic": topic, "ts": time.time()}
-        )
-        all_users = load_user_data()
-        uid = str(update.effective_user.id)
+        context.user_data.setdefault("history", []).append({"q": msg, "topic": topic, "ts": time.time()})
+        all_users = load_user_data(); uid = str(update.effective_user.id)
         all_users.setdefault(uid, {"posts": [], "landing_pages": [], "queries": []})
-        all_users[uid]["queries"].append(
-            {"q": msg, "topic": topic, "ts": int(time.time())}
-        )
+        all_users[uid]["queries"].append({"q": msg, "topic": topic, "ts": int(time.time())})
         save_user_data(all_users)
         if USE_SHEETS:
             try:
-                SHEET_QUERIES.append_row(
-                    [int(time.time()), uid, msg, topic],
-                    value_input_option="USER_ENTERED",
-                )
+                SHEET_QUERIES.append_row([int(time.time()), uid, msg, topic], value_input_option="USER_ENTERED")
             except Exception:
                 pass
         return
@@ -1213,31 +1113,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Got it! 🙂 Filhaal mere paas is sawaal ka exact company-topic match nahi mila.\n"
             "Aap thoda detail me batao ya specific service pucho (Web Dev, Video Editing, Ads, etc.)."
         )
-    await send_with_quick_actions(
-        update,
-        context,
-        gem_text,
-        suggestions=get_followups_for_topic("services"),
-        topic_key="services",
-    )
+    await send_with_quick_actions(update, context, gem_text,
+                                  suggestions=get_followups_for_topic("services"), topic_key="services")
 
     # logging
-    context.user_data.setdefault("history", []).append(
-        {"q": msg, "topic": "gemini", "ts": time.time()}
-    )
-    all_users = load_user_data()
-    uid = str(update.effective_user.id)
+    context.user_data.setdefault("history", []).append({"q": msg, "topic": "gemini", "ts": time.time()})
+    all_users = load_user_data(); uid = str(update.effective_user.id)
     all_users.setdefault(uid, {"posts": [], "landing_pages": [], "queries": []})
-    all_users[uid]["queries"].append(
-        {"q": msg, "topic": "gemini", "ts": int(time.time())}
-    )
+    all_users[uid]["queries"].append({"q": msg, "topic": "gemini", "ts": int(time.time())})
     save_user_data(all_users)
     if USE_SHEETS:
         try:
-            SHEET_QUERIES.append_row(
-                [int(time.time()), uid, msg, "gemini"],
-                value_input_option="USER_ENTERED",
-            )
+            SHEET_QUERIES.append_row([int(time.time()), uid, msg, "gemini"], value_input_option="USER_ENTERED")
         except Exception:
             pass
 
@@ -1280,12 +1167,11 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_callback))  # keep before convos
+    app.add_handler(CommandHandler("cancel", lambda u, c: on_text(u, c)))  # /cancel uses the same path
 
     # Create Post convo
     cp_conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex("^🖼️ Create a Post$"), create_post_entry)
-        ],
+        entry_points=[MessageHandler(filters.Regex("^🖼️ Create a Post$"), create_post_entry)],
         states={
             CP_IMAGE: [
                 MessageHandler(filters.PHOTO, cp_image),
@@ -1301,63 +1187,41 @@ def main():
                 MessageHandler(filters.ALL, cancel_and_forward),
             ],
         },
-        fallbacks=[
-            CommandHandler("cancel", cp_cancel),
-            MessageHandler(filters.ALL, cancel_and_forward),
-        ],
+        fallbacks=[CommandHandler("cancel", cp_cancel), MessageHandler(filters.ALL, cancel_and_forward)],
         allow_reentry=True,
     )
     app.add_handler(cp_conv)
 
     # Landing Page convo
     lp_conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(
-                filters.Regex("^🧱 Create a Landing Page$"), create_landing_entry
-            )
-        ],
+        entry_points=[MessageHandler(filters.Regex("^🧱 Create a Landing Page$"), create_landing_entry)],
         states={
-            LP_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lp_name),
-                MessageHandler(filters.ALL, cancel_and_forward),
-            ],
+            LP_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_name), MessageHandler(filters.ALL, cancel_and_forward)],
             LP_LOGO: [
-                MessageHandler((filters.PHOTO | filters.Document.IMAGE), lp_logo),
+                MessageHandler((filters.PHOTO | filters.Document.ALL), lp_logo),
                 CommandHandler("skip", lp_skip_logo),
                 MessageHandler(filters.ALL, cancel_and_forward),
             ],
-            LP_SUB: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lp_sub),
-                MessageHandler(filters.ALL, cancel_and_forward),
-            ],
+            LP_SUB: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_sub), MessageHandler(filters.ALL, cancel_and_forward)],
             LP_DESC: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lp_desc),
                 CommandHandler("skip", lp_skip_desc),
                 MessageHandler(filters.ALL, cancel_and_forward),
             ],
-            LP_COLOR: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lp_color),
-                MessageHandler(filters.ALL, cancel_and_forward),
-            ],
-            LP_NICHE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lp_niche),
-                MessageHandler(filters.ALL, cancel_and_forward),
-            ],
+            LP_COLOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_color), MessageHandler(filters.ALL, cancel_and_forward)],
+            LP_NICHE: [MessageHandler(filters.TEXT & ~filters.COMMAND, lp_niche), MessageHandler(filters.ALL, cancel_and_forward)],
         },
-        fallbacks=[
-            CommandHandler("cancel", lp_cancel),
-            MessageHandler(filters.ALL, cancel_and_forward),
-        ],
+        fallbacks=[CommandHandler("cancel", lp_cancel), MessageHandler(filters.ALL, cancel_and_forward)],
         allow_reentry=True,
     )
     app.add_handler(lp_conv)
 
-    # Direct menu fallbacks
-    app.add_handler(
-        MessageHandler(filters.Regex("^🎬 Service Demos$"), show_service_demos)
-    )
+    # Direct menu fallbacks (now includes Services and Cancel)
+    app.add_handler(MessageHandler(filters.Regex("^🧰 Services$"), show_services))
+    app.add_handler(MessageHandler(filters.Regex("^🎬 Service Demos$"), show_service_demos))
     app.add_handler(MessageHandler(filters.Regex("^💼 Pricing$"), show_pricing))
     app.add_handler(MessageHandler(filters.Regex("^📣 Follow Us$"), show_follow_us))
+    app.add_handler(MessageHandler(filters.Regex("^❌ Cancel$"), on_text))
 
     # Generic text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
