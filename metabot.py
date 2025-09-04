@@ -1,15 +1,16 @@
 # bot.py
-# Metabull Universe Telegram Bot (env-based, with auto-cancel flow switching + Gemini fallback)
+# Metabull Universe Telegram Bot (env-based, auto-cancel flow switching + Gemini fallback + inline-logo HTML)
 # Python 3.10+ | python-telegram-bot==20.7
 
 import asyncio
+import base64
 import json
+import mimetypes
 import os
 import re
 import textwrap
 import time
 from io import BytesIO
-from zipfile import ZipFile
 from typing import Dict, List, Tuple, Optional
 
 from dotenv import load_dotenv
@@ -52,9 +53,12 @@ SOCIAL_DISCORD = os.getenv("SOCIAL_DISCORD", "")  # optional
 GSHEET_ID = os.getenv("GSHEET_ID", "").strip()  # full URL or plain id
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
-# Gemini (fallback Q&A)
+# Gemini fallback
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-pro").strip()
+
+# Meta Pixel (optional for LP)
+META_PIXEL_ID = os.getenv("META_PIXEL_ID", "").strip()
 
 # ---------------- OPTIONAL: Google Sheets logging ----------------
 USE_SHEETS = False
@@ -71,7 +75,6 @@ try:
         creds = Credentials.from_service_account_info(sa_info, scopes=scopes)
         gc = gspread.authorize(creds)
 
-        # Extract ID if a full URL is provided
         if "/spreadsheets/d/" in GSHEET_ID:
             GSHEET_ID_EXTRACTED = GSHEET_ID.split("/spreadsheets/d/")[1].split("/")[0]
         else:
@@ -198,10 +201,7 @@ def quick_actions_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📍 Location", callback_data="QA_LOCATION"),
             InlineKeyboardButton("✉️ Contact", callback_data="QA_CONTACT"),
         ],
-        # NOTE: Telegram inline button URLs officially support http/https. Keeping Call via WhatsApp instead of tel:
-        [
-            InlineKeyboardButton("📞 Call Sales (WhatsApp)", url=SOCIALS["WhatsApp"]),
-        ],
+        [InlineKeyboardButton("📞 Call Sales (WhatsApp)", url=SOCIALS["WhatsApp"])],
     ]
     if COMPANY_CHANNEL_URL:
         rows.append(
@@ -210,10 +210,11 @@ def quick_actions_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def suggestion_markup(suggestions: List[str]) -> InlineKeyboardMarkup:
+def suggestion_markup(labels: List[str], topic_key: str) -> InlineKeyboardMarkup:
+    # compact callback tokens -> reliable
     rows = [
-        [InlineKeyboardButton(f"❓ {s}", callback_data=f"SUGGEST::{s}")]
-        for s in suggestions[:6]
+        [InlineKeyboardButton(f"❓ {label}", callback_data=f"SG::{topic_key}")]
+        for label in labels[:6]
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -252,22 +253,12 @@ def pricing_to_text() -> str:
     return "\n\n".join(parts)
 
 
-def company_card() -> str:
-    return (
-        f"<b>{COMPANY['name']}</b>\n"
-        f"{COMPANY['type']}\n\n"
-        f"<b>Founded:</b> {COMPANY['founded_years']}\n"
-        f"<b>Founder & CEO:</b> {COMPANY['founder']}\n"
-        f"<b>HQ:</b> {COMPANY['hq']}\n\n"
-        f"<b>Email:</b> {COMPANY['email']}\n"
-        f"<b>Phone:</b> {COMPANY['phone']}\n"
-        f"<b>Employees:</b> {COMPANY['employees']}\n"
-        f"<b>Active Clients:</b> {COMPANY['active_clients']}"
-    )
+def safe_html(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def get_followups_for_topic(topic: str) -> List[str]:
-    topic = topic.lower()
+    topic = (topic or "").lower()
     if topic in {"web", "website", "webdev"}:
         return [
             "Static vs Dynamic website?",
@@ -416,6 +407,7 @@ async def send_with_quick_actions(
     context: ContextTypes.DEFAULT_TYPE,
     text: str,
     suggestions: Optional[List[str]] = None,
+    topic_key: Optional[str] = None,
 ):
     chat_id = update.effective_chat.id
     await context.bot.send_message(
@@ -425,17 +417,16 @@ async def send_with_quick_actions(
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
-    if suggestions:
+    if suggestions and topic_key:
         await context.bot.send_message(
             chat_id=chat_id,
             text="Try asking one of these for a more specific answer:",
-            reply_markup=suggestion_markup(suggestions),
+            reply_markup=suggestion_markup(suggestions, topic_key),
         )
 
 
 # ---------------- Global flow control (AUTO-CANCEL) ----------------
 def set_flow(context, name: Optional[str]):
-    # name ∈ {"cp", "lp", None}
     context.user_data["current_flow"] = name
 
 
@@ -448,48 +439,43 @@ CP_IMAGE, CP_CAPTION, CP_LINKS = range(100, 103)
 LP_NAME, LP_LOGO, LP_SUB, LP_DESC, LP_COLOR, LP_NICHE = range(200, 206)
 
 
-def safe_html(s: str) -> str:
-    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+# ========= Landing Page HTML with inline base64 logo =========
+def _file_to_data_uri(path: str) -> Optional[str]:
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        mime, _ = mimetypes.guess_type(path)
+        if not mime:
+            mime = "image/png"
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+    except Exception:
+        return None
 
 
 def build_landing_html(
     name: str, sub: str, desc: str, color: str, logo_filename: Optional[str]
 ) -> bytes:
     """
-    Renders a landing page that visually matches the provided Crypto Bazaar sample.
-    - Uses Tailwind CDN + custom keyframes (fadeInUp, zoomIn, fadeInBody).
-    - Dark radial background, gradient heading, animated CTA, disclaimer.
-    - CTA links to COMPANY_CHANNEL_URL if present, else SOCIALS['Telegram'].
-    - `color` drives the primary gradient; secondary is a deeper shade fallback.
+    Renders a landing page matching the Crypto Bazaar style.
+    If logo is provided, it is embedded inline as a base64 data-URI -> single .html file works everywhere.
     """
     brand = safe_html(name or "Your Brand")
     subh = safe_html(sub or "Expert insights. Real-time updates.")
     descr = safe_html(
         desc
-        or "We share content for informational and educational purposes only—this is not financial or investment advice. "
-        "Trading carries risk; always do your own research."
+        or "We share educational content only; not financial advice. Do your own research."
     )
 
-    # Primary color from args; secondary is a safe, deeper fallback if you don't want to compute shades.
     primary = color if color.startswith("#") else f"#{color}"
-    secondary = "#be185d"  # deep fuchsia/pink fallback (matches your sample)
-    accent = "#0891b2"  # cyan accent (matches your sample)
+    secondary = "#be185d"
+    accent = "#0891b2"
 
     cta_url = COMPANY_CHANNEL_URL or SOCIALS.get("Telegram", "#")
-    meta_pixel_id = os.getenv("META_PIXEL_ID", "").strip()
-
-    # If a logo file was uploaded, embed <img>. We ship it separately when zipping.
-    logo_tag = ""
-    if logo_filename:
-        logo_tag = (
-            '<img src="logo.png" alt="Brand Logo" '
-            'class="w-4/5 max-w-[400px] md:max-w-[300px] rounded-xl mx-auto mb-5 mt-8 '
-            'shadow-[0_10px_30px_rgba(225,29,72,0.3)] opacity-0 animate-[zoomIn_1s_ease_forwards] [animation-delay:1s]" />'
-        )
 
     # Optional Meta Pixel
     meta_pixel = ""
-    if meta_pixel_id:
+    if META_PIXEL_ID:
         meta_pixel = f"""
 <!-- Meta Pixel Code -->
 <script>
@@ -501,14 +487,29 @@ n.queue=[];t=b.createElement(e);t.async=!0;
 t.src=v;s=b.getElementsByTagName(e)[0];
 s.parentNode.insertBefore(t,s)}}(window, document,'script',
 'https://connect.facebook.net/en_US/fbevents.js');
-fbq('init', '{meta_pixel_id}');
+fbq('init', '{META_PIXEL_ID}');
 fbq('track', 'PageView');
 </script>
 <noscript><img height="1" width="1" style="display:none"
-src="https://www.facebook.com/tr?id={meta_pixel_id}&ev=PageView&noscript=1"
+src="https://www.facebook.com/tr?id={META_PIXEL_ID}&ev=PageView&noscript=1"
 /></noscript>
 <!-- End Meta Pixel Code -->
 """
+
+    # Inline logo (if any)
+    logo_img_tag = ""
+    favicon_href = ""
+    og_image = ""
+    if logo_filename:
+        data_uri = _file_to_data_uri(logo_filename)
+        if data_uri:
+            logo_img_tag = (
+                f'<img src="{data_uri}" alt="Brand Logo" '
+                'class="w-4/5 max-w-[400px] md:max-w-[300px] rounded-xl mx-auto mb-5 mt-8 '
+                'shadow-[0_10px_30px_rgba(225,29,72,0.3)] opacity-0 animate-[zoomIn_1s_ease_forwards] [animation-delay:1s]" />'
+            )
+            favicon_href = f'<link rel="icon" href="{data_uri}" type="image/png" />'
+            og_image = f'<meta property="og:image" content="{data_uri}" />'
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -525,11 +526,11 @@ src="https://www.facebook.com/tr?id={meta_pixel_id}&ev=PageView&noscript=1"
 
     <meta property="og:title" content="{brand} - Expert Market Insights" />
     <meta property="og:description" content="{subh}"/>
-    <meta property="og:image" content="logo.png" />
+    {og_image}
     <meta property="og:url" content="{cta_url}" />
     <meta property="og:type" content="website" />
 
-    <link rel="icon" href="logo.png" type="image/png" />
+    {favicon_href}
 
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -574,14 +575,13 @@ src="https://www.facebook.com/tr?id={meta_pixel_id}&ev=PageView&noscript=1"
   <body class="bg-[radial-gradient(circle_at_center,_#1f2937,_#111827,_#000000)] text-light font-sans overflow-x-hidden min-h-screen flex justify-center items-start animate-[fadeInBody_0.6s_ease-in]">
     <div class="w-full max-w-7xl p-4 animate-[fadeInUp_1s_ease_forwards]">
       <section class="text-center p-2 opacity-0 animate-[fadeInUp_1s_ease_forwards] [animation-delay:0.8s]">
-        {logo_tag}
+        {logo_img_tag}
         <h2 class="text-3xl md:text-3xl mb-4 font-bold bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent opacity-0 animate-[fadeInUp_1s_ease_forwards] [animation-delay:1.2s]">
           {brand}
         </h2>
 
         <p class="md:text-lg text-xl leading-relaxed max-w-[680px] mx-auto mb-6 opacity-0 animate-[fadeInUp_1s_ease_forwards] [animation-delay:1.4s]">
-          {subh}<br/>
-          {descr}
+          {subh}<br/>{descr}
         </p>
 
         <a href="{cta_url}" target="_blank"
@@ -637,10 +637,6 @@ def _read_file(path: str) -> str:
 
 
 async def gemini_answer(query: str) -> Optional[str]:
-    """
-    Uses local knowledgebase.txt and llm_commands.txt if present.
-    Falls back gracefully if Gemini not configured.
-    """
     if not _gemini_ready:
         return None
     kb = _read_file("knowledgebase.txt")
@@ -680,7 +676,7 @@ async def gemini_answer(query: str) -> Optional[str]:
 
 # ---------------- Handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    set_flow(context, None)  # cancel any ongoing flow
+    set_flow(context, None)
     context.user_data.setdefault("history", [])
     context.user_data["last_action"] = "start"
     welcome = (
@@ -708,6 +704,7 @@ async def show_pricing(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Any bulk discount?",
             "Timeline for delivery?",
         ],
+        topic_key="pricing",
     )
 
 
@@ -865,14 +862,12 @@ async def cp_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
         )
 
-    # Persist locally
+    # Persist + Sheets
     all_users = load_user_data()
     uid = str(update.effective_user.id)
     all_users.setdefault(uid, {"posts": [], "landing_pages": [], "queries": []})
     all_users[uid]["posts"].append(context.user_data["create_post"])
     save_user_data(all_users)
-
-    # Log to Google Sheets
     if USE_SHEETS:
         try:
             SHEET_POSTS.append_row(
@@ -891,8 +886,7 @@ async def cp_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="✅ Post created! You can forward this to your channels.",
+        chat_id=update.effective_chat.id, text="✅ Post created! You can forward this."
     )
     set_flow(context, None)
     return ConversationHandler.END
@@ -918,13 +912,39 @@ async def create_landing_entry(update: Update, context: ContextTypes.DEFAULT_TYP
     return LP_NAME
 
 
+async def _save_image_from_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> Optional[str]:
+    """Supports both photo and image document."""
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    elif update.message.document and (
+        update.message.document.mime_type or ""
+    ).startswith("image/"):
+        file_id = update.message.document.file_id
+    else:
+        return None
+
+    tg_file = await context.bot.get_file(file_id)
+    os.makedirs("uploads", exist_ok=True)
+    # keep original extension if possible
+    ext = ""
+    if update.message.document and update.message.document.file_name:
+        _, ext = os.path.splitext(update.message.document.file_name)
+    if not ext:
+        ext = ".png"
+    filename = f"uploads/logo_{update.effective_user.id}_{int(time.time())}{ext}"
+    await tg_file.download_to_drive(filename)
+    return filename
+
+
 async def lp_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_flow(context, "lp"):
         return ConversationHandler.END
     context.user_data["lp"]["name"] = update.message.text.strip()
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="Upload a <b>logo/image</b> (PNG/JPG), or type /skip to continue without logo.",
+        text="Upload a <b>logo/image</b> (PNG/JPG) as Photo or Document, or type /skip to continue without logo.",
         parse_mode=ParseMode.HTML,
     )
     return LP_LOGO
@@ -933,13 +953,9 @@ async def lp_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def lp_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_flow(context, "lp"):
         return ConversationHandler.END
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        file = await context.bot.get_file(file_id)
-        os.makedirs("uploads", exist_ok=True)
-        filename = f"uploads/logo_{update.effective_user.id}_{int(time.time())}.png"
-        await file.download_to_drive(filename)
-        context.user_data["lp"]["logo_path"] = filename
+    saved = await _save_image_from_message(update, context)
+    if saved:
+        context.user_data["lp"]["logo_path"] = saved
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="✅ Logo saved. Now send a <b>Sub-heading</b>.",
@@ -1032,38 +1048,23 @@ async def lp_niche(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lp["name"], lp["sub"], lp["desc"], lp["color"], lp.get("logo_path")
     )
 
-    # Send as ZIP if logo exists, else as .html
-    if lp.get("logo_path"):
-        buf = BytesIO()
-        with ZipFile(buf, "w") as z:
-            z.writestr("index.html", html_bytes)
-            with open(lp["logo_path"], "rb") as f:
-                z.writestr("logo.png", f.read())
-        buf.seek(0)
-        safe_name = re.sub(r"\W+", "_", lp["name"])
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=InputFile(buf, filename=f"landing_{safe_name}.zip"),
-            caption="✅ Your landing page is ready (index.html + logo.png).",
-        )
-    else:
-        buf = BytesIO(html_bytes)
-        buf.seek(0)  # IMPORTANT: ensure pointer at start
-        safe_name = re.sub(r"\W+", "_", lp["name"])
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=InputFile(buf, filename=f"landing_{safe_name}.html"),
-            caption="✅ Your landing page HTML is ready.",
-        )
+    # ALWAYS send single HTML (logo inline) -> no zip needed
+    buf = BytesIO(html_bytes)
+    buf.seek(0)
+    safe_name = re.sub(r"\W+", "_", lp["name"])
+    await context.bot.send_document(
+        chat_id=update.effective_chat.id,
+        document=InputFile(buf, filename=f"landing_{safe_name}.html"),
+        caption="✅ Your landing page HTML is ready.",
+    )
 
-    # Persist locally
+    # Persist + Sheets
     all_users = load_user_data()
     uid = str(update.effective_user.id)
     all_users.setdefault(uid, {"posts": [], "landing_pages": [], "queries": []})
     all_users[uid]["landing_pages"].append(lp)
     save_user_data(all_users)
 
-    # Log to Google Sheets
     if USE_SHEETS:
         try:
             SHEET_LP.append_row(
@@ -1083,7 +1084,7 @@ async def lp_niche(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="Need edits? Just rerun 🧱 Create a Landing Page from the menu.",
+        text="Need edits? Run 🧱 Create a Landing Page again.",
     )
     set_flow(context, None)
     return ConversationHandler.END
@@ -1097,13 +1098,13 @@ async def lp_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ---- QUICK ACTIONS / SUGGESTIONS ----
+# ---- CALLBACKS ----
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Any inline tap cancels current flow and proceeds
     set_flow(context, None)
     q = update.callback_query
     data = q.data or ""
     await q.answer()
+    # print("Callback:", data)
 
     if data.startswith("QA_"):
         key = data[3:]
@@ -1118,18 +1119,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(
             txt, parse_mode=ParseMode.HTML, reply_markup=quick_actions_markup()
         )
+        sugg = get_followups_for_topic(topic)
+        if sugg:
+            await q.message.reply_text(
+                "More you can ask:", reply_markup=suggestion_markup(sugg, topic)
+            )
         return
 
-    if data.startswith("SUGGEST::"):
-        suggested = data.split("::", 1)[1]
-        topic, sugg, _ = classify(suggested)
+    if data.startswith("SG::"):
+        topic = data.split("::", 1)[1] or "services"
         ans = answer_for_class(topic)
         await q.message.reply_text(
             ans, parse_mode=ParseMode.HTML, reply_markup=quick_actions_markup()
         )
+        sugg = get_followups_for_topic(topic)
         if sugg:
             await q.message.reply_text(
-                "More you can ask:", reply_markup=suggestion_markup(sugg)
+                "More you can ask:", reply_markup=suggestion_markup(sugg, topic)
             )
         return
 
@@ -1138,7 +1144,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (update.message.text or "").strip()
 
-    # If user hits any menu button, cancel current flow first
     if msg in {
         "🔄 Start",
         "🖼️ Create a Post",
@@ -1149,7 +1154,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }:
         set_flow(context, None)
 
-    # Bottom-menu actions
     if msg == "🔄 Start":
         return await start(update, context)
     if msg == "🖼️ Create a Post":
@@ -1163,16 +1167,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg == "📣 Follow Us":
         return await show_follow_us(update, context)
 
-    # Normal Q&A also cancels any previous flow
     set_flow(context, None)
 
     topic, sugg, max_score = classify(msg)
 
-    # If classifier found a decent company topic, answer directly
     if max_score > 0:
         ans = answer_for_class(topic)
-        await send_with_quick_actions(update, context, ans, suggestions=sugg)
-        # Logging
+        await send_with_quick_actions(
+            update, context, ans, suggestions=sugg, topic_key=topic
+        )
+        # logging
         context.user_data.setdefault("history", []).append(
             {"q": msg, "topic": topic, "ts": time.time()}
         )
@@ -1193,10 +1197,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         return
 
-    # Otherwise fallback to Gemini (open Q&A / generic query)
     gem_text = await gemini_answer(msg)
     if not gem_text:
-        # still reply something minimal
         gem_text = (
             "Got it! 🙂 Filhaal mere paas is sawaal ka exact company-topic match nahi mila.\n"
             "Aap thoda detail me batao ya specific service pucho (Web Dev, Video Editing, Ads, etc.)."
@@ -1206,9 +1208,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context,
         safe_html(gem_text),
         suggestions=get_followups_for_topic("services"),
+        topic_key="services",
     )
 
-    # Logging
+    # logging
     context.user_data.setdefault("history", []).append(
         {"q": msg, "topic": "gemini", "ts": time.time()}
     )
@@ -1229,11 +1232,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ---- Catch-all text inside any conversation state -> auto-cancel & forward to Q&A ----
+# ---- Catch-all inside any conversation state -> auto-cancel & forward to Q&A ----
 async def cancel_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """If user types any normal text while in a convo state, exit that flow and handle as Q&A."""
     set_flow(context, None)
-    # Manually forward to generic on_text
     await on_text(update, context)
     return ConversationHandler.END
 
@@ -1256,7 +1257,6 @@ def main():
             CP_IMAGE: [
                 MessageHandler(filters.PHOTO, cp_image),
                 CommandHandler("skip", cp_skip_image),
-                # NEW: catch-all text -> auto-cancel & Q&A
                 MessageHandler(filters.TEXT & ~filters.COMMAND, cancel_and_forward),
             ],
             CP_CAPTION: [
@@ -1273,7 +1273,6 @@ def main():
             MessageHandler(filters.ALL, cancel_and_forward),
         ],
         allow_reentry=True,
-        per_message=False,  # default; kept explicit
     )
     app.add_handler(cp_conv)
 
@@ -1290,7 +1289,7 @@ def main():
                 MessageHandler(filters.ALL, cancel_and_forward),
             ],
             LP_LOGO: [
-                MessageHandler(filters.PHOTO, lp_logo),
+                MessageHandler((filters.PHOTO | filters.Document.IMAGE), lp_logo),
                 CommandHandler("skip", lp_skip_logo),
                 MessageHandler(filters.ALL, cancel_and_forward),
             ],
@@ -1317,11 +1316,10 @@ def main():
             MessageHandler(filters.ALL, cancel_and_forward),
         ],
         allow_reentry=True,
-        per_message=False,
     )
     app.add_handler(lp_conv)
 
-    # Direct text handlers for menu items (fallback)
+    # Direct menu fallbacks
     app.add_handler(
         MessageHandler(filters.Regex("^🎬 Service Demos$"), show_service_demos)
     )
