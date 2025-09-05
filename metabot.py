@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-MetaBull Universe Telegram Bot (env-driven, keyword intents + Gemini Q/A, image-upload LP)
+MetaBull Universe Telegram Bot (no Q/A)
+- 6 bottom buttons: Start, Create Post, Create Landing Page, Service Demos, Follow Us, Cancel
+- Create Post: user sends image + phone/email/URL -> CTA buttons
+- Create Landing Page: logo via URL OR direct photo upload (embedded base64 data URI), color theme JSON, CTA link
+- Logs all user messages + bot replies to Google Sheet + Google Doc
 
-ENV REQUIRED (your .env):
+ENV (.env) expected:
 - BOT_TOKEN=...
 - SOCIAL_TELEGRAM=...
 - SOCIAL_INSTAGRAM=...
@@ -12,7 +16,6 @@ ENV REQUIRED (your .env):
 - GOOGLE_SERVICE_ACCOUNT_JSON=C:\\path\\to\\service_account.json
 - GSHEET_ID=...
 - GDRIVE_DOC_ID=...
-- (RECOMMENDED for AI Q/A) GEMINI_API_KEY=...
 
 Run:
   python bot.py
@@ -25,7 +28,7 @@ import html
 import json
 import base64
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from dotenv import load_dotenv
 
@@ -46,7 +49,6 @@ from telegram.ext import (
     MessageHandler,
     ConversationHandler,
     ContextTypes,
-    CallbackQueryHandler,
     filters,
 )
 
@@ -61,7 +63,7 @@ FOLLOW_LINKS = {
     "Google": os.getenv("SOCIAL_GOOGLE", "https://google.com/"),
     "LinkedIn": os.getenv("SOCIAL_LINKEDIN", "https://www.linkedin.com/"),
     "WhatsApp": os.getenv("SOCIAL_WHATSAPP", "https://wa.me/918982285510"),
-    "Discord": "https://discord.com/",
+    "Discord": "https://discord.com/",  # optional
 }
 
 SERVICE_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
@@ -70,12 +72,9 @@ if SERVICE_JSON and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
 
 GSHEET_ID = os.getenv("GSHEET_ID", "").strip()
 GDRIVE_DOC_ID = os.getenv("GDRIVE_DOC_ID", "").strip()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 # ---------------- Google APIs (Docs + Sheets) ----------------
-GSPREAD_READY = False
 SHEETS_WS = None
-DOCS_READY = False
 service_docs = None
 
 try:
@@ -99,9 +98,6 @@ try:
 
         if GDRIVE_DOC_ID:
             service_docs = build("docs", "v1", credentials=creds)
-            DOCS_READY = True
-
-        GSPREAD_READY = SHEETS_WS is not None and service_docs is not None
 except Exception as e:
     print("[WARN] Google APIs init issue:", e)
 
@@ -136,274 +132,10 @@ def log_to_google(user: str, message: str, reply: str):
         print("[WARN] Doc log failed:", e)
 
 
-# ---------------- Gemini (for Q/A) ----------------
-GEMINI_READY = False
-if GEMINI_API_KEY:
-    try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=GEMINI_API_KEY)
-        GEMINI_MODEL = genai.GenerativeModel("gemini-1.5-flash")
-        GEMINI_READY = True
-    except Exception as e:
-        print("[WARN] Gemini init failed:", e)
-
-
-async def gemini_answer_with_kb(question: str, kb_text: str) -> str:
-    """
-    Ground Gemini with the provided KB. Keep short, helpful, sales-friendly Hinglish.
-    """
-    if not GEMINI_READY:
-        return (
-            "Gemini not configured (add GEMINI_API_KEY in .env). "
-            "Filhaal, KB-based quick reply try karein."
-        )
-    try:
-        system = (
-            "You are MetaBull Universe's assistant. Use ONLY the given Knowledge Base as the primary source. "
-            "If something is not in KB, you may infer sensible, safe, brief guidance. "
-            "Style: short, Hinglish, friendly, helpful, sales-oriented. "
-            "Prefer KB prices if present. Return plain text."
-        )
-        prompt = f"{system}\n\nKnowledge Base:\n{kb_text}\n\nUser Question: {question}\n\nAnswer:"
-        resp = GEMINI_MODEL.generate_content(prompt)
-        return (
-            resp.text.strip()
-            if getattr(resp, "text", None)
-            else "Mujhe thoda unclear laga — please question dubara likho 🙂"
-        )
-    except Exception as e:
-        return f"Gemini error: {e}"
-
-
-# ---------------- Knowledge Base (from your prompt) ----------------
-KB_RAW = """
-Company Name: Metabull Universe
-Type: Corporate Service Provider (Creative + IT + Marketing)
-Founded: 5 years ago
-Founder & CEO: Neeraj Soni
-Headquarters: MP nagar. zone-2 ,Bhopal, Madhya Pradesh (Near Rani Kamlapati Station, Maharana Pratap Nagar)
-
-Email: metabull2@gmail.com
-Contact Number: +91 8982285510
-Employees: 20+
-Active Clients: 100+ per month
-
---- Services ---
-1. Advertisement Services (ADS)
-2. Video Editing: Ads, Social Media, Application Ads
-3. Graphic Designing: Logos, Branding, Custom Design
-4. Web Development: Static, Dynamic, Fully Functional Websites
-5. Account Handling: Business account handling
-6. Social Media Management: Posts, Growth, Strategy
-
---- Pricing ---
-Video Editing:
-- ai video = 600–700
-- high ai quality video = 1000–1200
-- ai model video = 1500–2000
-- ugc video = 2500–3000
-- white board animation = 1000–1500
-- video editing (1 min) = 500, bulk = 2000–2500
-- spoke person video = 5000–10000+
-- Social Media Videos: 5 min = 1000, 10 min = 2000, 15+ min = 2500
-- Application Ads: 1 min = 800
-
-Web Development:
-- Static Website = 4000 (single page + free domain)
-- Dynamic Normal Website = 7000 (multiple pages + Free domain)
-- Fully Functional Aesthetic = 8000–15000 (multiple pages with payment gateway + database)
-
-Graphic Designing:
-- Logo Design = 600, 2D 800–1000, 3D 1500+
-- Other Designs = Custom pricing
-
-Ads:
-- Multi-platform Ads = depends on budget & needs
-
-Social Media Management:
-- Single Account = 5000 per month (3 posts/day)
-
-Target Clients:
-- Startups, Enterprises, Promotional clients, Individual Professionals
-"""
-
-SUGGESTED_QUESTIONS = [
-    "Web development ke prices kya hain?",
-    "UGC video editing ka rate?",
-    "Logo 2D vs 3D price?",
-    "Social media management monthly plan?",
-    "Office location & contact?",
-]
-
-# ---------------- Keyword Intents (multiple synonyms → one answer) ----------------
-INTENTS = [
-    {
-        "name": "services",
-        "patterns": [
-            r"\bservices?\b",
-            r"\boffer\b",
-            r"\bprovide\b",
-            r"\bwhat\s+do\s+you\s+do\b",
-            r"\badvertis(e|ement|ing)\b",
-            r"\bvideo\s*editing\b",
-            r"\bgraphic\b",
-            r"\bweb\s*dev(elopment)?\b",
-            r"\bsocial\s*media\b",
-            r"\baccount\s*handling\b",
-        ],
-        "answer": (
-            "Hum **Creative + IT + Marketing** me ye services dete hain:\n"
-            "• Ads\n• Video Editing\n• Graphic Designing\n• Web Development\n• Account Handling\n• Social Media Management"
-        ),
-    },
-    {
-        "name": "pricing_web",
-        "patterns": [
-            r"\b(web|website|site)\b.*\b(price|pricing|cost|rate|charges)\b",
-            r"\b(price|pricing|cost|rate|charges)\b.*\b(web|website|site)\b",
-            r"\bstatic\b|\bdynamic\b|\bpayment\s*gateway\b|\bdatabase\b",
-        ],
-        "answer": (
-            "💻 **Web Dev Prices**:\n"
-            "• Static (1 page + free domain): **₹4,000**\n"
-            "• Dynamic (multi-page + free domain): **₹7,000**\n"
-            "• Fully Functional (Payment + DB): **₹8,000 – ₹15,000**"
-        ),
-    },
-    {
-        "name": "pricing_video",
-        "patterns": [
-            r"\b(video|edit|editing|ugc|white\s*board|whiteboard|spokes?person|application\s*ad|app\s*ad)\b",
-            r"\b(ai\s*video|high\s*ai|ai\s*model)\b",
-            r"\b(5\s*min|10\s*min|15\+?\s*min)\b",
-        ],
-        "answer": (
-            "🎬 **Video Editing Prices**:\n"
-            "• AI: 600–700 | High-AI: 1000–1200 | AI-Model: 1500–2000\n"
-            "• UGC: 2500–3000 | Whiteboard: 1000–1500 | 1-min edit: 500\n"
-            "• Bulk: 2000–2500 | Spokesperson: 5000–10000+\n"
-            "• Social: 5m=1000, 10m=2000, 15m+=2500 | App Ad (1m)=800"
-        ),
-    },
-    {
-        "name": "pricing_logo_graphic",
-        "patterns": [
-            r"\b(logo|graphic|branding|design)\b.*\b(price|pricing|cost|rate|charges)\b",
-            r"\b(price|pricing|cost|rate|charges)\b.*\b(logo|graphic|branding|design)\b",
-            r"\b2d\b|\b3d\b",
-        ],
-        "answer": (
-            "🎨 **Graphic/Logo Prices**:\n"
-            "• Logo: 600 | 2D: 800–1000 | 3D: 1500+\n"
-            "• Other designs: requirement ke hisaab se custom pricing"
-        ),
-    },
-    {
-        "name": "pricing_smm",
-        "patterns": [
-            r"\b(smm|social\s*media\s*manage|social\s*media\s*management|account\s*handling)\b",
-            r"\bposts?\s*/?\s*day\b",
-            r"\bmonthly\b",
-        ],
-        "answer": (
-            "📱 **Social Media Management**:\n"
-            "• Single account: **₹5,000/month** (3 posts/day)"
-        ),
-    },
-    {
-        "name": "location",
-        "patterns": [
-            r"\b(location|address|where|office|bhopal|headquarters|hq)\b",
-            r"\brani\s*kamlapati\b|\bmp\s*nagar\b|\bzone-?2\b",
-        ],
-        "answer": "📍 **HQ**: MP Nagar Zone-2, Bhopal (Near Rani Kamlapati Station, Maharana Pratap Nagar).",
-    },
-    {
-        "name": "contact",
-        "patterns": [
-            r"\b(contact|call|phone|mobile|email|reach|support)\b",
-            r"\bwhats?app\b",
-        ],
-        "answer": "📧 **Email**: metabull2@gmail.com | ☎️ **Call**: +91 8982285510 | WhatsApp pe bhi ping kar sakte ho.",
-    },
-    {
-        "name": "about_company",
-        "patterns": [
-            r"\b(name|company)\b",
-            r"\btype\b",
-            r"\bfounded\b",
-            r"\byears?\b",
-            r"\bexperience\b",
-            r"\bfounder\b|\bceo\b|\bneeraj\b",
-            r"\bteam|employees?\b|\bclients?\b",
-        ],
-        "answer": (
-            "**Metabull Universe** — Corporate Service Provider (Creative + IT + Marketing), "
-            "founded **5 years** ago by **Neeraj Soni**. Team **20+**, active clients **100+ per month**."
-        ),
-    },
-    {
-        "name": "ads",
-        "patterns": [
-            r"\bads?\b|\badvertis(e|ement|ing)\b|\bgoogle\s*ads\b|\bmeta\s*ads\b|\bfacebook\s*ads\b|\binstagram\s*ads\b"
-        ],
-        "answer": "📢 **Multi-platform Ads** — pricing depends on aapke budget & needs. Strategy discuss kar lete hain!",
-    },
-]
-
-
-def detect_intent(question: str) -> Optional[str]:
-    q = question.lower()
-    for intent in INTENTS:
-        if any(re.search(p, q) for p in intent["patterns"]):
-            return intent["answer"]
-    return None
-
-
-# ---------------- Minimal KB-map fallback (last resort) ----------------
-KB_MAP: Dict[str, str] = {
-    r"\b(name|company)\b": "Humara company naam Metabull Universe hai.",
-    r"\b(type|company type|what do you do)\b": "Hum Creative + IT + Marketing services provide karte hain.",
-    r"\b(founder|ceo|neeraj)\b": "Founder & CEO: Neeraj Soni.",
-    r"\b(head|addr|location|address|bhopal|office)\b": "HQ: MP Nagar Zone-2, Bhopal (Near Rani Kamlapati Station, Maharana Pratap Nagar).",
-    r"\b(contact|email|phone|call)\b": "Email: metabull2@gmail.com | Call: +91 8982285510.",
-    r"\b(services?|offer)\b": "Hum Ads, Video Editing, Graphic Designing, Web Development, Account Handling, Social Media Management provide karte hain.",
-    r"\b(video|edit|ugc|white\s?board|spoke|application)\b": "Video pricing: ai 600–700, high-ai 1000–1200, ai-model 1500–2000, UGC 2500–3000, whiteboard 1000–1500, 1-min edit 500, bulk 2000–2500, spokesperson 5000–10000+, social 5m=1000/10m=2000/15m+=2500, app ad 1m=800.",
-    r"\b(web|website|static|dynamic|payment|gateway|db|development)\b": "Web Dev: Static 4000 (1-page + free domain), Dynamic 7000, Full Aesthetic 8000–15000 (Payment+DB).",
-    r"\b(graphic|logo|branding|design)\b": "Logo: 600, 2D 800–1000, 3D 1500+, others custom.",
-    r"\b(social|management|posts|growth|strategy)\b": "Social Media Mgmt: 5000/month (3 posts/day).",
-    r"\b(price|pricing|cost|rate)\b": "Quick rates: Web (4k–15k), Video (500–10k+), Logo (600–1500+), SMM (5k/m).",
-}
-
-
-def kb_lookup(q: str) -> Optional[str]:
-    ql = q.lower()
-    for pattern, ans in KB_MAP.items():
-        if re.search(pattern, ql):
-            return ans
-    return None
-
-
-def qa_footer_buttons() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("📦 Services", callback_data="qa_services"),
-                InlineKeyboardButton("💰 Prices", callback_data="qa_prices"),
-            ],
-            [
-                InlineKeyboardButton("📍 Location", callback_data="qa_location"),
-                InlineKeyboardButton("📞 Call Sales", url="tel:+918982285510"),
-            ],
-        ]
-    )
-
-
 # ---------------- UI (Reply Keyboard) ----------------
 MAIN_KB = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("🔄 Start"), KeyboardButton("❓ Q/A")],
+        [KeyboardButton("🔄 Start")],
         [KeyboardButton("🖼️ Create a Post"), KeyboardButton("🌐 Create a Landing Page")],
         [KeyboardButton("🧪 Service Demos"), KeyboardButton("🌟 Follow Us")],
         [KeyboardButton("⛔ Cancel")],
@@ -416,7 +148,6 @@ MAIN_KB = ReplyKeyboardMarkup(
 # ---------------- States ----------------
 (
     STATE_IDLE,
-    STATE_QA,
     STATE_CREATE_POST_WAIT_IMAGE,
     STATE_CREATE_POST_WAIT_LINK,
     STATE_CREATE_LP_NAME,
@@ -425,7 +156,7 @@ MAIN_KB = ReplyKeyboardMarkup(
     STATE_CREATE_LP_DESC,
     STATE_CREATE_LP_COLORS,
     STATE_CREATE_LP_NICHE,
-) = range(10)
+) = range(9)
 
 
 def get_userpad(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
@@ -445,7 +176,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Hey! 👋 Main **MetaBull Universe** ka assistant hoon.\n\n"
         "Neeche buttons se choose karein:\n"
-        "• ❓ Q/A — Keyword intents + Gemini (KB-grounded)\n"
         "• 🖼️ Create a Post — Image + link se CTA post\n"
         "• 🌐 Create a Landing Page — URL ya photo se logo, custom colors, HTML\n"
         "• 🧪 Service Demos — Sample links\n"
@@ -465,66 +195,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
     log_to_google(user, "Cancel pressed", "Cleared state")
     return STATE_IDLE
-
-
-# ----- Q/A (Keyword intents → Gemini+KB → minimal KB fallback) -----
-async def qa_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❓ Q/A mode ON — apna sawal bhejein (Hinglish). Pehle keywords detect honge; warna Gemini + KB se answer milega.\n"
-        "Eg: “website price?”, “UGC video rate?”, “logo 3D price?”, “office location?”"
-    )
-    user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
-    log_to_google(user, "Q/A selected", "Awaiting question")
-    return STATE_QA
-
-
-async def qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.message.text or ""
-
-    # 1) Keyword-intent first (multiple synonyms → one answer)
-    intent_ans = detect_intent(q)
-    if intent_ans:
-        ans_main = intent_ans
-    else:
-        # 2) Gemini grounded by KB
-        if GEMINI_READY:
-            ans_main = await gemini_answer_with_kb(q, KB_RAW)
-        else:
-            # 3) Minimal KB-map fallback (last resort)
-            kb_ans = kb_lookup(q)
-            ans_main = (
-                kb_ans
-                if kb_ans
-                else (
-                    "Mujhe clear keyword nahi mila. Better AI answers ke liye GEMINI_API_KEY add karen."
-                )
-            )
-
-    suggestions_line = "Suggestions: " + " | ".join(SUGGESTED_QUESTIONS[:3])
-    final_ans = f"{ans_main}\n\n{suggestions_line}"
-
-    await update.message.reply_text(final_ans, reply_markup=qa_footer_buttons())
-    user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
-    log_to_google(user, q, final_ans)
-    return STATE_QA
-
-
-async def qa_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    key = query.data
-    if key == "qa_services":
-        txt = "Services: Ads • Video Editing • Graphic Design • Web Dev • Account Handling • Social Media Mgmt."
-    elif key == "qa_prices":
-        txt = "Quick Prices:\n• Web: 4k–15k\n• Video: 500–10k+\n• Logo: 600–1500+\n• SMM: 5k/m\nDetails poochna ho toh message karein 🙂"
-    elif key == "qa_location":
-        txt = "HQ: MP Nagar Zone-2, Bhopal (Near Rani Kamlapati Station, Maharana Pratap Nagar)."
-    else:
-        txt = "Sales: +91 8982285510"
-    await query.edit_message_reply_markup(reply_markup=qa_footer_buttons())
-    await query.message.reply_text(txt)
-    user = f"{query.from_user.full_name} (@{query.from_user.username})"
-    log_to_google(user, f"[QA footer] {key}", txt)
 
 
 # ----- Create a Post -----
@@ -860,8 +530,6 @@ async def bottom_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
     if txt == "🔄 Start":
         return await start(update, context)
-    if txt == "❓ Q/A":
-        return await qa_entry(update, context)
     if txt == "🖼️ Create a Post":
         return await create_post_entry(update, context)
     if txt == "🌐 Create a Landing Page":
@@ -875,11 +543,11 @@ async def bottom_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # default nudge
     await update.message.reply_text(
-        "Aap **❓ Q/A** select karke sawal pooch sakte hain 🙂", reply_markup=MAIN_KB
+        "Choose an option from the keyboard below 🙂", reply_markup=MAIN_KB
     )
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
     from_text = txt if txt else "[non-text]"
-    log_to_google(user, from_text, "Prompted to use Q/A")
+    log_to_google(user, from_text, "Prompted to pick a menu option")
     return STATE_IDLE
 
 
@@ -905,7 +573,6 @@ def main():
         entry_points=[
             CommandHandler("start", start),
             MessageHandler(filters.Regex("^🔄 Start$"), bottom_router),
-            MessageHandler(filters.Regex("^❓ Q/A$"), bottom_router),
             MessageHandler(filters.Regex("^🖼️ Create a Post$"), bottom_router),
             MessageHandler(filters.Regex("^🌐 Create a Landing Page$"), bottom_router),
             MessageHandler(filters.Regex("^🧪 Service Demos$"), bottom_router),
@@ -915,10 +582,6 @@ def main():
         states={
             STATE_IDLE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bottom_router)
-            ],
-            STATE_QA: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, qa_message),
-                CommandHandler("cancel", cancel),
             ],
             STATE_CREATE_POST_WAIT_IMAGE: [
                 MessageHandler(filters.PHOTO, create_post_got_image),
@@ -966,7 +629,6 @@ def main():
     )
 
     app.add_handler(conv)
-    app.add_handler(CallbackQueryHandler(qa_callbacks))
 
     print("Bot running...")
     app.run_polling()
