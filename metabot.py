@@ -1,26 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-MetaBull Universe Telegram Bot (no Q/A)
-- 6 bottom buttons: Start, Create Post, Create Landing Page, Service Demos, Follow Us, Cancel
-- Create Post: user sends image + phone/email/URL -> CTA buttons
-- Create Landing Page: logo via URL OR direct photo upload (embedded base64 data URI), color theme JSON, CTA link
-- Logs all user messages + bot replies to Google Sheet + Google Doc
-
-ENV (.env) expected:
-- BOT_TOKEN=...
-- SOCIAL_TELEGRAM=...
-- SOCIAL_INSTAGRAM=...
-- SOCIAL_GOOGLE=...
-- SOCIAL_LINKEDIN=...
-- SOCIAL_WHATSAPP=...
-- GOOGLE_SERVICE_ACCOUNT_JSON=C:\\path\\to\\service_account.json
-- GSHEET_ID=...
-- GDRIVE_DOC_ID=...
-
-Run:
-  python bot.py
-"""
-
 import os
 import re
 import io
@@ -490,7 +467,10 @@ async def create_lp_get_niche(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ----- Service Demos (replace with real links) -----
 SERVICE_DEMOS = {
-    "Websites (Samples)": "https://example.com/websites",
+    "Websites (Samples)": "https://metabulluniverse.com/",
+    "Websites (Samples)": "https://portfolio.metabulluniverse.com/",
+    "Websites (Samples)": "https://wamanhaus.com/",
+    "Websites (Samples)": "https://frescoclothing.shop/",
     "Drive (Showreel)": "https://drive.google.com/",
     "Ads Portfolio": "https://example.com/ads",
     "YouTube Playlist": "https://youtube.com/",
