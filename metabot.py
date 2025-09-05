@@ -1,18 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-MetaBull Universe Telegram Bot (env-driven)
-Uses your .env keys:
-- BOT_TOKEN
-- SOCIAL_TELEGRAM, SOCIAL_INSTAGRAM, SOCIAL_GOOGLE, SOCIAL_LINKEDIN, SOCIAL_WHATSAPP
-- GOOGLE_SERVICE_ACCOUNT_JSON (full path to service account json)
-- GSHEET_ID, GDRIVE_DOC_ID
-- (optional) GEMINI_API_KEY
+MetaBull Universe Telegram Bot (env-driven, Gemini Q/A, image upload in Landing Page)
+
+ENV REQUIRED:
+- BOT_TOKEN=...
+- SOCIAL_TELEGRAM=...
+- SOCIAL_INSTAGRAM=...
+- SOCIAL_GOOGLE=...
+- SOCIAL_LINKEDIN=...
+- SOCIAL_WHATSAPP=...
+- GOOGLE_SERVICE_ACCOUNT_JSON=C:\\path\\to\\service_account.json
+- GSHEET_ID=...
+- GDRIVE_DOC_ID=...
+- (REQUIRED for Q/A) GEMINI_API_KEY=...
+
+Run:
+  python bot.py
 """
 
 import os
 import re
+import io
 import html
 import json
+import base64
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -20,7 +31,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Telegram
+# ---------------- Telegram ----------------
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -39,38 +50,32 @@ from telegram.ext import (
     filters,
 )
 
-# ============ ENV ============
-
+# ---------------- ENV ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise SystemExit("Missing BOT_TOKEN in .env")
 
-# Social links
 FOLLOW_LINKS = {
     "Telegram": os.getenv("SOCIAL_TELEGRAM", "https://t.me/"),
     "Instagram": os.getenv("SOCIAL_INSTAGRAM", "https://instagram.com/"),
     "Google": os.getenv("SOCIAL_GOOGLE", "https://google.com/"),
     "LinkedIn": os.getenv("SOCIAL_LINKEDIN", "https://www.linkedin.com/"),
     "WhatsApp": os.getenv("SOCIAL_WHATSAPP", "https://wa.me/918982285510"),
-    "Discord": "https://discord.com/",  # optional; change if you have
+    "Discord": "https://discord.com/",
 }
 
-# Google service account JSON
 SERVICE_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 if SERVICE_JSON and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-    # set for google libraries
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_JSON
 
 GSHEET_ID = os.getenv("GSHEET_ID", "").strip()
 GDRIVE_DOC_ID = os.getenv("GDRIVE_DOC_ID", "").strip()
-
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# ============ Google APIs ============
-
+# ---------------- Google APIs (Docs + Sheets) ----------------
 GSPREAD_READY = False
-DOCS_READY = False
 SHEETS_WS = None
+DOCS_READY = False
 service_docs = None
 
 try:
@@ -91,6 +96,7 @@ try:
         if GSHEET_ID:
             SHEET = gc.open_by_key(GSHEET_ID)
             SHEETS_WS = SHEET.sheet1
+
         if GDRIVE_DOC_ID:
             service_docs = build("docs", "v1", credentials=creds)
             DOCS_READY = True
@@ -102,7 +108,7 @@ except Exception as e:
 
 def log_to_google(user: str, message: str, reply: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Sheets
+    # Sheet
     try:
         if SHEETS_WS:
             SHEETS_WS.append_row(
@@ -130,8 +136,7 @@ def log_to_google(user: str, message: str, reply: str):
         print("[WARN] Doc log failed:", e)
 
 
-# ============ Gemini ============
-
+# ---------------- Gemini (REQUIRED for Q/A) ----------------
 GEMINI_READY = False
 if GEMINI_API_KEY:
     try:
@@ -144,22 +149,35 @@ if GEMINI_API_KEY:
         print("[WARN] Gemini init failed:", e)
 
 
-async def gemini_answer(prompt: str) -> str:
+async def gemini_answer_with_kb(question: str, kb_text: str) -> str:
+    """
+    Ground Gemini with the provided KB. Keep short, helpful, sales-friendly Hinglish.
+    """
     if not GEMINI_READY:
-        return "Gemini is not configured yet. (Set GEMINI_API_KEY in .env)"
+        return (
+            "Gemini is not configured. Add GEMINI_API_KEY in .env to enable AI answers.\n"
+            "Fallback: please /start again or ask a simpler KB question."
+        )
     try:
+        system = (
+            "You are MetaBull Universe's assistant. Use ONLY the given Knowledge Base as the primary source. "
+            "If something is not in KB, you may infer sensible, safe, brief guidance. "
+            "Style: short, Hinglish, friendly, helpful, sales-oriented. "
+            "If prices/figures exist in KB, prefer those. "
+            "Return plain text without markdown code fences."
+        )
+        prompt = f"{system}\n\nKnowledge Base:\n{kb_text}\n\nUser Question: {question}\n\nAnswer:"
         resp = GEMINI_MODEL.generate_content(prompt)
         return (
             resp.text.strip()
             if getattr(resp, "text", None)
-            else "No response from Gemini."
+            else "Mujhe thoda unclear laga — please question dubara likho 🙂"
         )
     except Exception as e:
         return f"Gemini error: {e}"
 
 
-# ============ Knowledge Base ============
-
+# ---------------- Knowledge Base (from your prompt) ----------------
 KB_RAW = """
 Company Name: Metabull Universe
 Type: Corporate Service Provider (Creative + IT + Marketing)
@@ -187,25 +205,25 @@ Video Editing:
 - ai model video = 1500–2000
 - ugc video = 2500–3000
 - white board animation = 1000–1500
-- editing (1 min) = 500, bulk = 2000–2500
+- video editing (1 min) = 500, bulk = 2000–2500
 - spoke person video = 5000–10000+
 - Social Media Videos: 5 min = 1000, 10 min = 2000, 15+ min = 2500
 - Application Ads: 1 min = 800
 
 Web Development:
-- Static = 4000 (single page with free domain)
-- Dynamic Normal = 7000 (multi page, free domain)
-- Fully Functional Aesthetic = 8000–15000 (payment + DB)
+- Static Website = 4000 (single page with free domain)
+- Dynamic Normal Website = 7000 (multiple pages with Free domain)
+- Fully Functional Aesthetic Website = 8000–15000 (multiple pages with payment gateway + database)
 
 Graphic Designing:
-- Logo = 600 / 2D 800–1000 / 3D 1500+
-- Others = Custom
+- Logo Design = 600, 2D 800–1000, 3D 1500+
+- Other Designs = Custom pricing
 
 Ads:
-- Multi-platform = depends on budget & needs
+- Multi-platform Ads = depends on budget & needs
 
 Social Media Management:
-- Single Account = 5000/month (3 posts/day)
+- Single Account = 5000 per month (3 posts/day)
 
 Target Clients:
 - Startups, Enterprises, Promotional clients, Individual Professionals
@@ -213,24 +231,25 @@ Target Clients:
 
 SUGGESTED_QUESTIONS = [
     "Web development ke prices kya hain?",
-    "Video editing me UGC ka rate?",
-    "Graphic logo 2D vs 3D price?",
+    "UGC video editing ka rate?",
+    "Logo 2D vs 3D price?",
     "Social media management monthly plan?",
     "Office location & contact?",
 ]
 
+# Minimal keyword fallback (only if Gemini is not configured)
 KB_MAP: Dict[str, str] = {
-    r"\b(name|company)\b": "Humara company naam **Metabull Universe** hai.",
+    r"\b(name|company)\b": "Humara company naam Metabull Universe hai.",
     r"\b(type|company type|what do you do)\b": "Hum Creative + IT + Marketing services provide karte hain.",
-    r"\b(founder|ceo|neeraj)\b": "Founder & CEO: **Neeraj Soni**.",
-    r"\b(head|addr|location|address|bhopal|office)\b": "HQ: **MP Nagar Zone-2, Bhopal** (Near Rani Kamlapati Station, Maharana Pratap Nagar).",
-    r"\b(contact|email|phone|call)\b": "Email: **metabull2@gmail.com** | Call: **+91 8982285510**.",
-    r"\b(services?|offer)\b": "Hum **Ads, Video Editing, Graphic Designing, Web Development, Account Handling, Social Media Management** provide karte hain.",
-    r"\b(video|edit|ugc|white\s?board|spoke|application)\b": "Video Editing pricing: ai 600–700, high-ai 1000–1200, ai-model 1500–2000, UGC 2500–3000, whiteboard 1000–1500, 1-min edit 500, bulk 2000–2500, spokesperson 5000–10000+, social 5m=1000,10m=2000,15m+=2500, app ad 1m=800.",
+    r"\b(founder|ceo|neeraj)\b": "Founder & CEO: Neeraj Soni.",
+    r"\b(head|addr|location|address|bhopal|office)\b": "HQ: MP Nagar Zone-2, Bhopal (Near Rani Kamlapati Station, Maharana Pratap Nagar).",
+    r"\b(contact|email|phone|call)\b": "Email: metabull2@gmail.com | Call: +91 8982285510.",
+    r"\b(services?|offer)\b": "Hum Ads, Video Editing, Graphic Designing, Web Development, Account Handling, Social Media Management provide karte hain.",
+    r"\b(video|edit|ugc|white\s?board|spoke|application)\b": "Video pricing: ai 600–700, high-ai 1000–1200, ai-model 1500–2000, UGC 2500–3000, whiteboard 1000–1500, 1-min edit 500, bulk 2000–2500, spokesperson 5000–10000+, social 5m=1000/10m=2000/15m+=2500, app ad 1m=800.",
     r"\b(web|website|static|dynamic|payment|gateway|db|development)\b": "Web Dev: Static 4000 (1-page + free domain), Dynamic 7000, Full Aesthetic 8000–15000 (Payment+DB).",
-    r"\b(graphic|logo|branding|design)\b": "Graphic/Logo: Logo 600, 2D 800–1000, 3D 1500+, other designs custom.",
+    r"\b(graphic|logo|branding|design)\b": "Logo: 600, 2D 800–1000, 3D 1500+, others custom.",
     r"\b(social|management|posts|growth|strategy)\b": "Social Media Mgmt: 5000/month (3 posts/day).",
-    r"\b(price|pricing|cost|rate)\b": "Short rates: Web (4k–15k), Video (500–10k+), Logo (600–1500+), SMM (5k/m).",
+    r"\b(price|pricing|cost|rate)\b": "Quick rates: Web (4k–15k), Video (500–10k+), Logo (600–1500+), SMM (5k/m).",
 }
 
 
@@ -257,8 +276,7 @@ def qa_footer_buttons() -> InlineKeyboardMarkup:
     )
 
 
-# ============ UI ============
-
+# ---------------- UI (Reply Keyboard) ----------------
 MAIN_KB = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🔄 Start"), KeyboardButton("❓ Q/A")],
@@ -271,6 +289,7 @@ MAIN_KB = ReplyKeyboardMarkup(
     is_persistent=True,
 )
 
+# ---------------- States ----------------
 (
     STATE_IDLE,
     STATE_QA,
@@ -291,17 +310,21 @@ def get_userpad(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
     return context.user_data["pad"]
 
 
-# ============ Handlers ============
+# ---------------- Helpers ----------------
+def _bytes_to_data_uri(data: bytes, mime: str = "image/jpeg") -> str:
+    b64 = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{b64}"
 
 
+# ---------------- Handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Hey! 👋 Main **MetaBull Universe** ka assistant hoon.\n\n"
         "Neeche buttons se choose karein:\n"
-        "• ❓ Q/A — KB/Gemini se jawaab + suggestions\n"
+        "• ❓ Q/A — KB + Gemini se jawaab (AI enabled)\n"
         "• 🖼️ Create a Post — Image + link se CTA post\n"
-        "• 🌐 Create a Landing Page — Details dekar HTML\n"
-        "• 🧪 Service Demos — Samples\n"
+        "• 🌐 Create a Landing Page — URL ya photo se logo, custom colors, HTML\n"
+        "• 🧪 Service Demos — Sample links\n"
         "• 🌟 Follow Us — Social links\n"
         "• ⛔ Cancel — Current flow stop\n\n"
         "Ready when you are. 🚀"
@@ -320,10 +343,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_IDLE
 
 
-# --- Q/A
+# ----- Q/A (Gemini + KB) -----
 async def qa_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Apna sawal bhejein (Hinglish chalega). Pehle KB check hoga; agar na mila toh Gemini help karega.\n"
+        "Apna sawal bhejein (Hinglish). Main KB + Gemini se answer dunga.\n"
         "Examples: “Web development ke prices?”, “UGC video rate?”, “Office location?”"
     )
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
@@ -333,27 +356,25 @@ async def qa_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.message.text or ""
-    kb_ans = kb_lookup(q)
-    if kb_ans:
-        ans = f"**Answer (KB):** {kb_ans}\n\n_Suggestions:_ " + "; ".join(
-            SUGGESTED_QUESTIONS[:3]
-        )
+    if GEMINI_READY:
+        ans_main = await gemini_answer_with_kb(q, KB_RAW)
     else:
-        prompt = f"""
-You are an assistant for MetaBull Universe (Creative + IT + Marketing).
-User question: {q}
+        # Fallback to keyword reply if Gemini not configured
+        kb_ans = kb_lookup(q)
+        if kb_ans:
+            ans_main = f"KB: {kb_ans}"
+        else:
+            ans_main = (
+                "Gemini API key missing. Add GEMINI_API_KEY in .env for AI answers. "
+                "Filhaal, aap Services/Prices buttons se details dekh sakte hain."
+            )
+    # compose with suggestions
+    suggestions_line = "Suggestions: " + " | ".join(SUGGESTED_QUESTIONS[:3])
+    final_ans = f"{ans_main}\n\n{suggestions_line}"
 
-If the answer exists in this KB, stay consistent; else freely answer, but keep it short, helpful, and sales-friendly.
-
-KB:
-{KB_RAW}
-"""
-        ans = "**Answer (Gemini):** " + (await gemini_answer(prompt))
-    await update.message.reply_text(
-        ans, reply_markup=qa_footer_buttons(), parse_mode="Markdown"
-    )
+    await update.message.reply_text(final_ans, reply_markup=qa_footer_buttons())
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
-    log_to_google(user, q, ans)
+    log_to_google(user, q, final_ans)
     return STATE_QA
 
 
@@ -367,7 +388,6 @@ async def qa_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = "Quick Prices:\n• Web: 4k–15k\n• Video: 500–10k+\n• Logo: 600–1500+\n• SMM: 5k/m\nDetails poochna ho toh message karein 🙂"
     elif key == "qa_location":
         txt = "HQ: MP Nagar Zone-2, Bhopal (Near Rani Kamlapati Station, Maharana Pratap Nagar)."
-        # else case covered by Call Sales URL in button
     else:
         txt = "Sales: +91 8982285510"
     await query.edit_message_reply_markup(reply_markup=qa_footer_buttons())
@@ -376,7 +396,7 @@ async def qa_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_to_google(user, f"[QA footer] {key}", txt)
 
 
-# --- Create a Post
+# ----- Create a Post -----
 async def create_post_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pad = get_userpad(context)
     pad.clear()
@@ -432,7 +452,7 @@ async def create_post_got_link(update: Update, context: ContextTypes.DEFAULT_TYP
     link = (update.message.text or "").strip()
     pad["post_link"] = link
     caption = (
-        "✨ **MetaBull Universe** — Creative + IT + Marketing\n"
+        "✨ MetaBull Universe — Creative + IT + Marketing\n"
         "Fast delivery • Affordable pricing • Proven results.\n\n"
         "Need this service? Tap the buttons below 👇"
     )
@@ -440,7 +460,6 @@ async def create_post_got_link(update: Update, context: ContextTypes.DEFAULT_TYP
         chat_id=update.effective_chat.id,
         photo=pad["post_image_file_id"],
         caption=caption,
-        parse_mode="Markdown",
         reply_markup=_build_post_cta_buttons(link),
     )
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
@@ -450,7 +469,7 @@ async def create_post_got_link(update: Update, context: ContextTypes.DEFAULT_TYP
     return STATE_IDLE
 
 
-# --- Create a Landing Page
+# ----- Create a Landing Page (supports URL or direct photo upload for logo) -----
 LP_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -475,25 +494,6 @@ LP_TEMPLATE = """<!DOCTYPE html>
               light: "{LIGHT}"
             }},
             fontFamily: {{ sans: ['"Inter"', "system-ui", "sans-serif"] }},
-            keyframes: {{
-              fadeInUp: {{
-                "0%": {{ opacity: "0", transform: "translateY(30px)" }},
-                "100%": {{ opacity: "1", transform: "translateY(0)" }},
-              }},
-              zoomIn: {{
-                "0%": {{ opacity: "0", transform: "scale(0.8)" }},
-                "100%": {{ opacity: "1", transform: "scale(1)" }},
-              }},
-              fadeInBody: {{
-                from: {{ opacity: "0" }},
-                to: {{ opacity: "1" }},
-              }},
-            }},
-            animation: {{
-              fadeInUp: "fadeInUp 1s ease forwards",
-              zoomIn: "zoomIn 1s ease forwards",
-              fadeInBody: "fadeInBody 1s ease-in",
-            }},
           }},
         }},
       }};
@@ -550,15 +550,45 @@ async def create_lp_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_lp_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pad = get_userpad(context)
     pad["lp_title"] = update.message.text.strip()
-    await update.message.reply_text("Logo/Image ka **URL** bhejein (https://...)")
+    await update.message.reply_text(
+        "Logo/Image ka **URL** bhejein (https://...) **ya** seedha **photo upload** kar dein."
+    )
     return STATE_CREATE_LP_LOGO
 
 
 async def create_lp_get_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pad = get_userpad(context)
-    pad["lp_logo"] = update.message.text.strip()
-    await update.message.reply_text("**Subheading** bhejein.")
-    return STATE_CREATE_LP_SUB
+
+    # Photo path
+    if update.message and update.message.photo:
+        try:
+            file_id = update.message.photo[-1].file_id
+            file = await context.bot.get_file(file_id)
+            bio = io.BytesIO()
+            await file.download_to_memory(out=bio)
+            bio.seek(0)
+            data_uri = _bytes_to_data_uri(bio.read(), mime="image/jpeg")
+            pad["lp_logo"] = data_uri
+            await update.message.reply_text(
+                "✅ Image received. Ab **Subheading** bhejein."
+            )
+            return STATE_CREATE_LP_SUB
+        except Exception as e:
+            await update.message.reply_text(
+                f"Image read failed: {e}\nPlease URL ya photo dobara bhejein."
+            )
+            return STATE_CREATE_LP_LOGO
+
+    # URL path
+    if update.message and update.message.text:
+        pad["lp_logo"] = update.message.text.strip()
+        await update.message.reply_text("**Subheading** bhejein.")
+        return STATE_CREATE_LP_SUB
+
+    await update.message.reply_text(
+        "Please send **image URL** ya **photo upload** karke try karein."
+    )
+    return STATE_CREATE_LP_LOGO
 
 
 async def create_lp_get_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -608,6 +638,7 @@ async def create_lp_get_niche(update: Update, context: ContextTypes.DEFAULT_TYPE
         if txt and txt[-1].startswith("http")
         else FOLLOW_LINKS.get("WhatsApp", "https://wa.me/918982285510")
     )
+
     title = pad.get("lp_title", "Your Brand")
     logo = pad.get("lp_logo", "logo.jpg")
     sub = pad.get("lp_sub", "We build results, not just pages.")
@@ -622,6 +653,7 @@ async def create_lp_get_niche(update: Update, context: ContextTypes.DEFAULT_TYPE
         },
     )
     kws = f"{niche}, MetaBull Universe, {title}, services, pricing, contact"
+
     html_code = LP_TEMPLATE.format(
         TITLE=html.escape(title),
         HEADING=html.escape(title),
@@ -635,10 +667,12 @@ async def create_lp_get_niche(update: Update, context: ContextTypes.DEFAULT_TYPE
         LIGHT=colors.get("light", "#111827"),
         CTA_LINK=html.escape(cta),
     )
+
     safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in title)
     fn = f"{safe_name}.html"
     with open(fn, "w", encoding="utf-8") as f:
         f.write(html_code)
+
     await update.message.reply_document(
         document=InputFile(fn),
         filename=fn,
@@ -653,7 +687,7 @@ async def create_lp_get_niche(update: Update, context: ContextTypes.DEFAULT_TYPE
     return STATE_IDLE
 
 
-# --- Service Demos (replace with real)
+# ----- Service Demos (replace with real links) -----
 SERVICE_DEMOS = {
     "Websites (Samples)": "https://example.com/websites",
     "Drive (Showreel)": "https://drive.google.com/",
@@ -666,16 +700,14 @@ async def service_demos(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = [[InlineKeyboardButton(f"🔗 {k}", url=v)] for k, v in SERVICE_DEMOS.items()]
     kb = InlineKeyboardMarkup(rows)
     await update.message.reply_text(
-        "🧪 **Service Demos** — samples & portfolios:",
-        reply_markup=kb,
-        parse_mode="Markdown",
+        "🧪 **Service Demos** — samples & portfolios:", reply_markup=kb
     )
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
     log_to_google(user, "Service Demos opened", "Links shown")
     return STATE_IDLE
 
 
-# --- Follow Us
+# ----- Follow Us -----
 async def follow_us(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows, row = [], []
     for name, url in FOLLOW_LINKS.items():
@@ -686,15 +718,13 @@ async def follow_us(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if row:
         rows.append(row)
     kb = InlineKeyboardMarkup(rows)
-    await update.message.reply_text(
-        "🌟 **Follow Us**", reply_markup=kb, parse_mode="Markdown"
-    )
+    await update.message.reply_text("🌟 **Follow Us**", reply_markup=kb)
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
     log_to_google(user, "Follow Us opened", "Links shown")
     return STATE_IDLE
 
 
-# --- Bottom bar router
+# ----- Bottom router -----
 async def bottom_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
     if txt == "🔄 Start":
@@ -711,6 +741,7 @@ async def bottom_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await follow_us(update, context)
     if txt == "⛔ Cancel":
         return await cancel(update, context)
+
     # default nudge
     await update.message.reply_text(
         "Aap **❓ Q/A** select karke sawal pooch sakte hain 🙂", reply_markup=MAIN_KB
@@ -721,7 +752,7 @@ async def bottom_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_IDLE
 
 
-# --- Raw logger (optional)
+# ----- Raw logger (optional) -----
 async def log_all_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
@@ -735,9 +766,7 @@ async def log_all_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-# ============ App ============
-
-
+# ---------------- App ----------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -773,7 +802,10 @@ def main():
                 CommandHandler("cancel", cancel),
             ],
             STATE_CREATE_LP_LOGO: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, create_lp_get_logo),
+                MessageHandler(
+                    (filters.TEXT & ~filters.COMMAND) | filters.PHOTO,
+                    create_lp_get_logo,
+                ),
                 CommandHandler("cancel", cancel),
             ],
             STATE_CREATE_LP_SUB: [
@@ -797,7 +829,7 @@ def main():
         allow_reentry=True,
     )
 
-    # Global raw logger (runs after the conv so it doesn't eat messages)
+    # Global raw logger (after conv, separate group)
     app.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND, log_all_incoming), group=1
     )
