@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-MetaBull Universe Telegram Bot (env-driven, Gemini Q/A, image upload in Landing Page)
+MetaBull Universe Telegram Bot (env-driven, keyword intents + Gemini Q/A, image-upload LP)
 
-ENV REQUIRED:
+ENV REQUIRED (your .env):
 - BOT_TOKEN=...
 - SOCIAL_TELEGRAM=...
 - SOCIAL_INSTAGRAM=...
@@ -12,7 +12,7 @@ ENV REQUIRED:
 - GOOGLE_SERVICE_ACCOUNT_JSON=C:\\path\\to\\service_account.json
 - GSHEET_ID=...
 - GDRIVE_DOC_ID=...
-- (REQUIRED for Q/A) GEMINI_API_KEY=...
+- (RECOMMENDED for AI Q/A) GEMINI_API_KEY=...
 
 Run:
   python bot.py
@@ -136,7 +136,7 @@ def log_to_google(user: str, message: str, reply: str):
         print("[WARN] Doc log failed:", e)
 
 
-# ---------------- Gemini (REQUIRED for Q/A) ----------------
+# ---------------- Gemini (for Q/A) ----------------
 GEMINI_READY = False
 if GEMINI_API_KEY:
     try:
@@ -155,16 +155,15 @@ async def gemini_answer_with_kb(question: str, kb_text: str) -> str:
     """
     if not GEMINI_READY:
         return (
-            "Gemini is not configured. Add GEMINI_API_KEY in .env to enable AI answers.\n"
-            "Fallback: please /start again or ask a simpler KB question."
+            "Gemini not configured (add GEMINI_API_KEY in .env). "
+            "Filhaal, KB-based quick reply try karein."
         )
     try:
         system = (
             "You are MetaBull Universe's assistant. Use ONLY the given Knowledge Base as the primary source. "
             "If something is not in KB, you may infer sensible, safe, brief guidance. "
             "Style: short, Hinglish, friendly, helpful, sales-oriented. "
-            "If prices/figures exist in KB, prefer those. "
-            "Return plain text without markdown code fences."
+            "Prefer KB prices if present. Return plain text."
         )
         prompt = f"{system}\n\nKnowledge Base:\n{kb_text}\n\nUser Question: {question}\n\nAnswer:"
         resp = GEMINI_MODEL.generate_content(prompt)
@@ -211,9 +210,9 @@ Video Editing:
 - Application Ads: 1 min = 800
 
 Web Development:
-- Static Website = 4000 (single page with free domain)
-- Dynamic Normal Website = 7000 (multiple pages with Free domain)
-- Fully Functional Aesthetic Website = 8000–15000 (multiple pages with payment gateway + database)
+- Static Website = 4000 (single page + free domain)
+- Dynamic Normal Website = 7000 (multiple pages + Free domain)
+- Fully Functional Aesthetic = 8000–15000 (multiple pages with payment gateway + database)
 
 Graphic Designing:
 - Logo Design = 600, 2D 800–1000, 3D 1500+
@@ -237,7 +236,132 @@ SUGGESTED_QUESTIONS = [
     "Office location & contact?",
 ]
 
-# Minimal keyword fallback (only if Gemini is not configured)
+# ---------------- Keyword Intents (multiple synonyms → one answer) ----------------
+INTENTS = [
+    {
+        "name": "services",
+        "patterns": [
+            r"\bservices?\b",
+            r"\boffer\b",
+            r"\bprovide\b",
+            r"\bwhat\s+do\s+you\s+do\b",
+            r"\badvertis(e|ement|ing)\b",
+            r"\bvideo\s*editing\b",
+            r"\bgraphic\b",
+            r"\bweb\s*dev(elopment)?\b",
+            r"\bsocial\s*media\b",
+            r"\baccount\s*handling\b",
+        ],
+        "answer": (
+            "Hum **Creative + IT + Marketing** me ye services dete hain:\n"
+            "• Ads\n• Video Editing\n• Graphic Designing\n• Web Development\n• Account Handling\n• Social Media Management"
+        ),
+    },
+    {
+        "name": "pricing_web",
+        "patterns": [
+            r"\b(web|website|site)\b.*\b(price|pricing|cost|rate|charges)\b",
+            r"\b(price|pricing|cost|rate|charges)\b.*\b(web|website|site)\b",
+            r"\bstatic\b|\bdynamic\b|\bpayment\s*gateway\b|\bdatabase\b",
+        ],
+        "answer": (
+            "💻 **Web Dev Prices**:\n"
+            "• Static (1 page + free domain): **₹4,000**\n"
+            "• Dynamic (multi-page + free domain): **₹7,000**\n"
+            "• Fully Functional (Payment + DB): **₹8,000 – ₹15,000**"
+        ),
+    },
+    {
+        "name": "pricing_video",
+        "patterns": [
+            r"\b(video|edit|editing|ugc|white\s*board|whiteboard|spokes?person|application\s*ad|app\s*ad)\b",
+            r"\b(ai\s*video|high\s*ai|ai\s*model)\b",
+            r"\b(5\s*min|10\s*min|15\+?\s*min)\b",
+        ],
+        "answer": (
+            "🎬 **Video Editing Prices**:\n"
+            "• AI: 600–700 | High-AI: 1000–1200 | AI-Model: 1500–2000\n"
+            "• UGC: 2500–3000 | Whiteboard: 1000–1500 | 1-min edit: 500\n"
+            "• Bulk: 2000–2500 | Spokesperson: 5000–10000+\n"
+            "• Social: 5m=1000, 10m=2000, 15m+=2500 | App Ad (1m)=800"
+        ),
+    },
+    {
+        "name": "pricing_logo_graphic",
+        "patterns": [
+            r"\b(logo|graphic|branding|design)\b.*\b(price|pricing|cost|rate|charges)\b",
+            r"\b(price|pricing|cost|rate|charges)\b.*\b(logo|graphic|branding|design)\b",
+            r"\b2d\b|\b3d\b",
+        ],
+        "answer": (
+            "🎨 **Graphic/Logo Prices**:\n"
+            "• Logo: 600 | 2D: 800–1000 | 3D: 1500+\n"
+            "• Other designs: requirement ke hisaab se custom pricing"
+        ),
+    },
+    {
+        "name": "pricing_smm",
+        "patterns": [
+            r"\b(smm|social\s*media\s*manage|social\s*media\s*management|account\s*handling)\b",
+            r"\bposts?\s*/?\s*day\b",
+            r"\bmonthly\b",
+        ],
+        "answer": (
+            "📱 **Social Media Management**:\n"
+            "• Single account: **₹5,000/month** (3 posts/day)"
+        ),
+    },
+    {
+        "name": "location",
+        "patterns": [
+            r"\b(location|address|where|office|bhopal|headquarters|hq)\b",
+            r"\brani\s*kamlapati\b|\bmp\s*nagar\b|\bzone-?2\b",
+        ],
+        "answer": "📍 **HQ**: MP Nagar Zone-2, Bhopal (Near Rani Kamlapati Station, Maharana Pratap Nagar).",
+    },
+    {
+        "name": "contact",
+        "patterns": [
+            r"\b(contact|call|phone|mobile|email|reach|support)\b",
+            r"\bwhats?app\b",
+        ],
+        "answer": "📧 **Email**: metabull2@gmail.com | ☎️ **Call**: +91 8982285510 | WhatsApp pe bhi ping kar sakte ho.",
+    },
+    {
+        "name": "about_company",
+        "patterns": [
+            r"\b(name|company)\b",
+            r"\btype\b",
+            r"\bfounded\b",
+            r"\byears?\b",
+            r"\bexperience\b",
+            r"\bfounder\b|\bceo\b|\bneeraj\b",
+            r"\bteam|employees?\b|\bclients?\b",
+        ],
+        "answer": (
+            "**Metabull Universe** — Corporate Service Provider (Creative + IT + Marketing), "
+            "founded **5 years** ago by **Neeraj Soni**. Team **20+**, active clients **100+ per month**."
+        ),
+    },
+    {
+        "name": "ads",
+        "patterns": [
+            r"\bads?\b|\badvertis(e|ement|ing)\b|\bgoogle\s*ads\b|\bmeta\s*ads\b|\bfacebook\s*ads\b|\binstagram\s*ads\b"
+        ],
+        "answer": "📢 **Multi-platform Ads** — pricing depends on aapke budget & needs. Strategy discuss kar lete hain!",
+    },
+]
+
+
+def detect_intent(question: str) -> Optional[str]:
+    q = question.lower()
+    for intent in INTENTS:
+        if any(re.search(p, q) for p in intent["patterns"]):
+            return intent["answer"]
+    return None
+
+
+# ---------------- Minimal KB-map fallback (last resort) ----------------
 KB_MAP: Dict[str, str] = {
     r"\b(name|company)\b": "Humara company naam Metabull Universe hai.",
     r"\b(type|company type|what do you do)\b": "Hum Creative + IT + Marketing services provide karte hain.",
@@ -321,7 +445,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Hey! 👋 Main **MetaBull Universe** ka assistant hoon.\n\n"
         "Neeche buttons se choose karein:\n"
-        "• ❓ Q/A — KB + Gemini se jawaab (AI enabled)\n"
+        "• ❓ Q/A — Keyword intents + Gemini (KB-grounded)\n"
         "• 🖼️ Create a Post — Image + link se CTA post\n"
         "• 🌐 Create a Landing Page — URL ya photo se logo, custom colors, HTML\n"
         "• 🧪 Service Demos — Sample links\n"
@@ -343,11 +467,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return STATE_IDLE
 
 
-# ----- Q/A (Gemini + KB) -----
+# ----- Q/A (Keyword intents → Gemini+KB → minimal KB fallback) -----
 async def qa_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Apna sawal bhejein (Hinglish). Main KB + Gemini se answer dunga.\n"
-        "Examples: “Web development ke prices?”, “UGC video rate?”, “Office location?”"
+        "❓ Q/A mode ON — apna sawal bhejein (Hinglish). Pehle keywords detect honge; warna Gemini + KB se answer milega.\n"
+        "Eg: “website price?”, “UGC video rate?”, “logo 3D price?”, “office location?”"
     )
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
     log_to_google(user, "Q/A selected", "Awaiting question")
@@ -356,19 +480,26 @@ async def qa_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def qa_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.message.text or ""
-    if GEMINI_READY:
-        ans_main = await gemini_answer_with_kb(q, KB_RAW)
+
+    # 1) Keyword-intent first (multiple synonyms → one answer)
+    intent_ans = detect_intent(q)
+    if intent_ans:
+        ans_main = intent_ans
     else:
-        # Fallback to keyword reply if Gemini not configured
-        kb_ans = kb_lookup(q)
-        if kb_ans:
-            ans_main = f"KB: {kb_ans}"
+        # 2) Gemini grounded by KB
+        if GEMINI_READY:
+            ans_main = await gemini_answer_with_kb(q, KB_RAW)
         else:
+            # 3) Minimal KB-map fallback (last resort)
+            kb_ans = kb_lookup(q)
             ans_main = (
-                "Gemini API key missing. Add GEMINI_API_KEY in .env for AI answers. "
-                "Filhaal, aap Services/Prices buttons se details dekh sakte hain."
+                kb_ans
+                if kb_ans
+                else (
+                    "Mujhe clear keyword nahi mila. Better AI answers ke liye GEMINI_API_KEY add karen."
+                )
             )
-    # compose with suggestions
+
     suggestions_line = "Suggestions: " + " | ".join(SUGGESTED_QUESTIONS[:3])
     final_ans = f"{ans_main}\n\n{suggestions_line}"
 
