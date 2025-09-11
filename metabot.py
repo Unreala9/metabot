@@ -5,7 +5,7 @@ import html
 import json
 import base64
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple, Optional
 
 from dotenv import load_dotenv
 
@@ -25,6 +25,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ConversationHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -33,6 +34,10 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise SystemExit("Missing BOT_TOKEN in .env")
+
+ADMIN_USERNAMES = {
+    u.strip().lower() for u in os.getenv("ADMIN_USERNAMES", "").split(",") if u.strip()
+}
 
 FOLLOW_LINKS = {
     "Telegram": os.getenv("SOCIAL_TELEGRAM", "https://t.me/"),
@@ -51,11 +56,18 @@ GSHEET_ID = os.getenv("GSHEET_ID", "").strip()
 GDRIVE_DOC_ID = os.getenv("GDRIVE_DOC_ID", "").strip()
 
 # ---------------- Google APIs (Docs + Sheets) ----------------
-SHEETS_WS = None
+SHEETS_WS = None  # sheet1 for logs
+SHEETS_DEMOS_WS = None  # ServiceDemos worksheet
 service_docs = None
 
-try:
-    if SERVICE_JSON:
+
+def _try_init_google():
+    """Initialize gspread, Sheets + Docs. Create ServiceDemos worksheet if possible."""
+    global SHEETS_WS, SHEETS_DEMOS_WS, service_docs
+    if not SERVICE_JSON:
+        return
+
+    try:
         import gspread
         from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
@@ -70,18 +82,38 @@ try:
         gc = gspread.authorize(creds)
 
         if GSHEET_ID:
-            SHEET = gc.open_by_key(GSHEET_ID)
-            SHEETS_WS = SHEET.sheet1
+            sheet = gc.open_by_key(GSHEET_ID)
+            # logs: first sheet
+            try:
+                SHEETS_WS = sheet.sheet1
+            except Exception:
+                SHEETS_WS = None
+
+            # demos: ensure worksheet exists
+            try:
+                SHEETS_DEMOS_WS = sheet.worksheet("ServiceDemos")
+            except Exception:
+                try:
+                    SHEETS_DEMOS_WS = sheet.add_worksheet(
+                        title="ServiceDemos", rows=1000, cols=4
+                    )
+                    SHEETS_DEMOS_WS.update([["Name", "URL", "Category", "Order"]])
+                except Exception:
+                    SHEETS_DEMOS_WS = None
 
         if GDRIVE_DOC_ID:
             service_docs = build("docs", "v1", credentials=creds)
-except Exception as e:
-    print("[WARN] Google APIs init issue:", e)
+    except Exception as e:
+        print("[WARN] Google APIs init issue:", e)
 
 
+_try_init_google()
+
+
+# ---------------- Logging to Google ----------------
 def log_to_google(user: str, message: str, reply: str):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Sheet
+    # Sheet (logs)
     try:
         if SHEETS_WS:
             SHEETS_WS.append_row(
@@ -148,14 +180,262 @@ def _bytes_to_data_uri(data: bytes, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64,{b64}"
 
 
-# ---------------- Handlers ----------------
+def _is_admin(update: Update) -> bool:
+    uname = (update.effective_user.username or "").lower()
+    return bool(uname and uname in ADMIN_USERNAMES) or (
+        not ADMIN_USERNAMES
+    )  # if no env set, allow all
+
+
+def _chunk(lst: List, size: int) -> List[List]:
+    return [lst[i : i + size] for i in range(0, len(lst), size)]
+
+
+# ======================================================
+# Service Demo Store  (Sheets-backed with in-memory fallback)
+# ======================================================
+class ServiceDemoStore:
+    """Stores tuples of (name, url, category, order)."""
+
+    def __init__(self):
+        # fallback memory store
+        self._mem: List[Tuple[str, str, str, int]] = [
+            ("Websites1 (Samples1)", "https://metabulluniverse.com/", "Web", 1),
+            (
+                "Websites2 (Samples2)",
+                "https://portfolio.metabulluniverse.com/",
+                "Web",
+                2,
+            ),
+            ("Websites3 (Samples3)", "https://wamanhaus.com/", "Web", 3),
+            ("Websites4 (Samples4)", "https://frescoclothing.shop/", "Web", 4),
+            ("Drive (Showreel)", "https://drive.google.com/", "Media", 5),
+            ("Ads Portfolio", "https://example.com/ads", "Ads", 6),
+            ("YouTube Playlist", "https://youtube.com/", "Media", 7),
+        ]
+        self._loaded = False
+
+    def _read_from_sheet(self) -> Optional[List[Tuple[str, str, str, int]]]:
+        global SHEETS_DEMOS_WS
+        if not SHEETS_DEMOS_WS:
+            return None
+        try:
+            rows = SHEETS_DEMOS_WS.get_all_values()
+            # expect header
+            if not rows or rows[0][:3] != ["Name", "URL", "Category"]:
+                # normalize header at least
+                if rows and rows[0] != ["Name", "URL", "Category", "Order"]:
+                    SHEETS_DEMOS_WS.update([["Name", "URL", "Category", "Order"]])
+                rows = SHEETS_DEMOS_WS.get_all_values()
+            data = []
+            for r in rows[1:]:
+                name = (r[0] if len(r) > 0 else "").strip()
+                url = (r[1] if len(r) > 1 else "").strip()
+                cat = (r[2] if len(r) > 2 else "General").strip() or "General"
+                try:
+                    order = int(r[3]) if len(r) > 3 and r[3].strip() else 0
+                except Exception:
+                    order = 0
+                if name and url:
+                    data.append((name, url, cat, order))
+            # sort by order then name
+            data.sort(key=lambda x: (x[3], x[0].lower()))
+            return data
+        except Exception as e:
+            print("[WARN] read ServiceDemos failed:", e)
+            return None
+
+    def _write_to_sheet_append(self, name: str, url: str, cat: str, order: int):
+        global SHEETS_DEMOS_WS
+        if not SHEETS_DEMOS_WS:
+            return
+        try:
+            SHEETS_DEMOS_WS.append_row(
+                [name, url, cat, str(order)], value_input_option="USER_ENTERED"
+            )
+        except Exception as e:
+            print("[WARN] append ServiceDemos failed:", e)
+
+    def _delete_from_sheet_by_name(self, name: str) -> bool:
+        global SHEETS_DEMOS_WS
+        if not SHEETS_DEMOS_WS:
+            return False
+        try:
+            cells = SHEETS_DEMOS_WS.findall(name)
+            # delete rows that match exactly in Name col
+            for c in cells:
+                if c.col == 1:
+                    # verify row data
+                    row_vals = SHEETS_DEMOS_WS.row_values(c.row)
+                    if row_vals and row_vals[0] == name:
+                        SHEETS_DEMOS_WS.delete_rows(c.row)
+                        return True
+            return False
+        except Exception as e:
+            print("[WARN] delete ServiceDemos failed:", e)
+            return False
+
+    def load(self):
+        if self._loaded:
+            return
+        sheet_data = self._read_from_sheet()
+        if sheet_data is not None:
+            self._mem = sheet_data
+        self._loaded = True
+
+    def list(
+        self, category: Optional[str] = None, search: Optional[str] = None
+    ) -> List[Tuple[str, str, str, int]]:
+        self.load()
+        data = self._mem
+        if category and category.lower() != "all":
+            data = [d for d in data if d[2].lower() == category.lower()]
+        if search:
+            q = search.lower()
+            data = [d for d in data if q in d[0].lower() or q in d[2].lower()]
+        return data
+
+    def categories(self) -> List[str]:
+        self.load()
+        cats = sorted({d[2] for d in self._mem})
+        return ["All"] + cats
+
+    def add(
+        self,
+        name: str,
+        url: str,
+        category: str = "General",
+        order: Optional[int] = None,
+    ) -> str:
+        self.load()
+        if any(n.lower() == name.lower() for (n, _, _, _) in self._mem):
+            return "A demo with this name already exists."
+        if order is None:
+            order = max([d[3] for d in self._mem] or [0]) + 1
+        self._mem.append((name, url, category or "General", int(order)))
+        # persist if sheet available
+        self._write_to_sheet_append(name, url, category or "General", int(order))
+        return "Added."
+
+    def remove(self, name: str) -> str:
+        self.load()
+        idx = None
+        for i, (n, *_rest) in enumerate(self._mem):
+            if n.lower() == name.lower():
+                idx = i
+                break
+        if idx is None:
+            return "Not found."
+        del self._mem[idx]
+        # try sheet delete as well
+        deleted = self._delete_from_sheet_by_name(name)
+        if deleted:
+            return "Removed."
+        return "Removed (memory)."
+
+
+DEMO_STORE = ServiceDemoStore()
+
+# ======================================================
+# Demos UI
+# ======================================================
+DEMOS_PAGE_SIZE = 6  # number of link buttons per page
+
+
+def _build_demos_keyboard(
+    demos: List[Tuple[str, str, str, int]], page: int, category: str, search: str
+) -> InlineKeyboardMarkup:
+    total = len(demos)
+    start = page * DEMOS_PAGE_SIZE
+    end = start + DEMOS_PAGE_SIZE
+    slice_ = demos[start:end]
+
+    rows = []
+    for name, url, cat, _ord in slice_:
+        rows.append([InlineKeyboardButton(f"🔗 {name}", url=url)])
+
+    # nav row
+    nav = []
+    if start > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "◀️ Prev", callback_data=f"DEMOS:PAGE:{page-1}:{category}:{search}"
+            )
+        )
+    if end < total:
+        nav.append(
+            InlineKeyboardButton(
+                "Next ▶️", callback_data=f"DEMOS:PAGE:{page+1}:{category}:{search}"
+            )
+        )
+    if nav:
+        rows.append(nav)
+
+    # categories row
+    cats = DEMO_STORE.categories()
+    cat_buttons = []
+    for c in cats[:5]:  # show a few; you can expand
+        sel = "•" if c.lower() == (category or "all").lower() else ""
+        cat_buttons.append(
+            InlineKeyboardButton(f"{sel}{c}", callback_data=f"DEMOS:CAT:0:{c}:{search}")
+        )
+    rows.append(cat_buttons)
+
+    # search hint
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🔎 Search...", callback_data=f"DEMOS:SEARCH:{category}:{search}"
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(rows)
+
+
+async def open_demos_browser(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    page: int = 0,
+    category: str = "All",
+    search: str = "",
+):
+    demos = DEMO_STORE.list(
+        category=None if category == "All" else category, search=search or None
+    )
+    if not demos:
+        await (
+            update.callback_query.edit_message_text
+            if update.callback_query
+            else update.message.reply_text
+        )(
+            "No demos found. Add with `/adddemo Name | https://url | Category`",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        return
+    text = f"🧪 *Service Demos*\nCategory: `{category}` | Results: *{len(demos)}*"
+    kb = _build_demos_keyboard(demos, page, category, search or "")
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True
+        )
+    else:
+        await update.message.reply_text(
+            text, reply_markup=kb, parse_mode="Markdown", disable_web_page_preview=True
+        )
+
+
+# ======================================================
+# Core Handlers
+# ======================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "Hey! 👋 Main **MetaBull Universe** ka assistant hoon.\n\n"
         "Neeche buttons se choose karein:\n"
         "• 🖼️ Create a Post — Image + link se CTA post\n"
         "• 🌐 Create a Landing Page — URL ya photo se logo, custom colors, HTML\n"
-        "• 🧪 Service Demos — Sample links\n"
+        "• 🧪 Service Demos — Sample links (browse/add/remove)\n"
         "• 🌟 Follow Us — Social links\n"
         "• ⛔ Cancel — Current flow stop\n\n"
         "Ready when you are. 🚀"
@@ -247,9 +527,8 @@ async def create_post_got_link(update: Update, context: ContextTypes.DEFAULT_TYP
     return STATE_IDLE
 
 
-# ----- Create a Landing Page (supports URL or direct photo upload for logo) -----
-LP_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
+# ----- Create a Landing Page -----
+LP_TEMPLATE = """<!DOCTYPE html> <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -314,8 +593,7 @@ LP_TEMPLATE = """<!DOCTYPE html>
       </section>
     </div>
   </body>
-</html>
-"""
+</html>"""
 
 
 async def create_lp_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -336,7 +614,6 @@ async def create_lp_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def create_lp_get_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pad = get_userpad(context)
-
     # Photo path
     if update.message and update.message.photo:
         try:
@@ -356,13 +633,11 @@ async def create_lp_get_logo(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Image read failed: {e}\nPlease URL ya photo dobara bhejein."
             )
             return STATE_CREATE_LP_LOGO
-
     # URL path
     if update.message and update.message.text:
         pad["lp_logo"] = update.message.text.strip()
         await update.message.reply_text("**Subheading** bhejein.")
         return STATE_CREATE_LP_SUB
-
     await update.message.reply_text(
         "Please send **image URL** ya **photo upload** karke try karein."
     )
@@ -465,27 +740,143 @@ async def create_lp_get_niche(update: Update, context: ContextTypes.DEFAULT_TYPE
     return STATE_IDLE
 
 
-# ----- Service Demos (replace with real links) -----
-SERVICE_DEMOS = {
-    "Websites (Samples)": "https://metabulluniverse.com/",
-    "Websites1 (Samples)": "https://portfolio.metabulluniverse.com/",
-    "Websites2 (Samples)": "https://wamanhaus.com/",
-    "Websites3 (Samples)": "https://frescoclothing.shop/",
-    "Drive (Showreel)": "https://drive.google.com/",
-    "Ads Portfolio": "https://example.com/ads",
-    "YouTube Playlist": "https://youtube.com/",
-}
-
-
+# ----- Service Demos (advanced) -----
 async def service_demos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = [[InlineKeyboardButton(f"🔗 {k}", url=v)] for k, v in SERVICE_DEMOS.items()]
-    kb = InlineKeyboardMarkup(rows)
-    await update.message.reply_text(
-        "🧪 **Service Demos** — samples & portfolios:", reply_markup=kb
-    )
+    await open_demos_browser(update, context, page=0, category="All", search="")
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
-    log_to_google(user, "Service Demos opened", "Links shown")
+    log_to_google(user, "Service Demos opened", "Browser shown")
     return STATE_IDLE
+
+
+async def demos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # /demos [category?] [search query?]
+    args = context.args
+    cat = "All"
+    search = ""
+    if args:
+        # quick parse: if first word matches a category, treat as category; rest = search
+        cats_lower = [c.lower() for c in DEMO_STORE.categories()]
+        if args[0].lower() in cats_lower:
+            cat = DEMO_STORE.categories()[cats_lower.index(args[0].lower())]
+            search = " ".join(args[1:]) if len(args) > 1 else ""
+        else:
+            search = " ".join(args)
+    await open_demos_browser(update, context, page=0, category=cat, search=search)
+
+
+async def demos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle pagination / category / search callback."""
+    q = update.callback_query
+    if not q or not q.data:
+        return
+    parts = q.data.split(":", 4)
+    # DEMOS:PAGE:{page}:{category}:{search}
+    # DEMOS:CAT:{page}:{category}:{search}
+    # DEMOS:SEARCH:{category}:{search}
+    if len(parts) >= 2 and parts[0] == "DEMOS":
+        typ = parts[1]
+        if typ == "PAGE" and len(parts) == 5:
+            page = int(parts[2])
+            category = parts[3]
+            search = parts[4]
+            await open_demos_browser(
+                update, context, page=page, category=category, search=search
+            )
+        elif typ == "CAT" and len(parts) == 5:
+            page = int(parts[2])
+            category = parts[3]
+            search = parts[4]
+            await open_demos_browser(
+                update, context, page=0, category=category, search=search
+            )
+        elif typ == "SEARCH" and len(parts) == 4:
+            category = parts[2]
+            prev = parts[3]
+            await q.answer(
+                "Type: /demos <search terms>  (optional: start with category)"
+            )
+            # no edit here
+        else:
+            await q.answer("Unknown action")
+
+
+# ----- Admin: add/remove/list -----
+def _parse_adddemo(text: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Expected: /adddemo Name | https://url | Category
+    Category optional
+    """
+    m = re.split(r"\s*/adddemo\s*", text, flags=re.IGNORECASE)
+    body = (m[-1] if m else "").strip()
+    if "|" in body:
+        parts = [p.strip() for p in body.split("|")]
+        if len(parts) >= 2:
+            name = parts[0]
+            url = parts[1]
+            cat = parts[2] if len(parts) >= 3 else "General"
+            return (name, url, cat)
+    # try space-args fallback
+    # /adddemo Name https://url Category Words...
+    tokens = body.split()
+    if len(tokens) >= 2 and tokens[-2].startswith("http"):
+        url = tokens[-2]
+        name = " ".join(tokens[:-2]).strip()
+        cat = tokens[-1] if len(tokens) >= 3 else "General"
+        if name and url:
+            return (name, url, cat)
+    return None
+
+
+async def adddemo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.message.reply_text(
+            "Only admins can add demos. Set ADMIN_USERNAMES env."
+        )
+        return
+    parsed = _parse_adddemo(update.message.text or "")
+    if not parsed:
+        await update.message.reply_text(
+            "Usage:\n`/adddemo Name | https://link | Category`\n(Category optional)",
+            parse_mode="Markdown",
+        )
+        return
+    name, url, cat = parsed
+    msg = DEMO_STORE.add(name=name, url=url, category=cat)
+    await update.message.reply_text(f"{msg}  → *{name}* ({cat})", parse_mode="Markdown")
+
+
+async def removedemo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.message.reply_text(
+            "Only admins can remove demos. Set ADMIN_USERNAMES env."
+        )
+        return
+    # /removedemo Name...
+    name = (update.message.text or "").split(maxsplit=1)
+    if len(name) < 2:
+        await update.message.reply_text(
+            "Usage:\n`/removedemo Name`", parse_mode="Markdown"
+        )
+        return
+    target = name[1].strip()
+    msg = DEMO_STORE.remove(target)
+    await update.message.reply_text(f"{msg}  → *{target}*", parse_mode="Markdown")
+
+
+async def listdemos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.message.reply_text(
+            "Only admins can list demos. Set ADMIN_USERNAMES env."
+        )
+        return
+    data = DEMO_STORE.list()
+    if not data:
+        await update.message.reply_text("No demos.")
+        return
+    lines = [f"- *{n}* ({c}) — {u}" for (n, u, c, _o) in data]
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True
+    )
 
 
 # ----- Follow Us -----
@@ -499,7 +890,9 @@ async def follow_us(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if row:
         rows.append(row)
     kb = InlineKeyboardMarkup(rows)
-    await update.message.reply_text("🌟 **Follow Us**", reply_markup=kb)
+    await update.message.reply_text(
+        "🌟 **Follow Us**", reply_markup=kb, parse_mode="Markdown"
+    )
     user = f"{update.effective_user.full_name} (@{update.effective_user.username})"
     log_to_google(user, "Follow Us opened", "Links shown")
     return STATE_IDLE
@@ -549,6 +942,7 @@ async def log_all_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # conversation
     conv = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
@@ -603,10 +997,17 @@ def main():
         allow_reentry=True,
     )
 
-    # Global raw logger (after conv, separate group)
+    # global logger
     app.add_handler(
         MessageHandler(filters.ALL & ~filters.COMMAND, log_all_incoming), group=1
     )
+
+    # demos handlers
+    app.add_handler(CommandHandler("demos", demos_command))
+    app.add_handler(CallbackQueryHandler(demos_callback, pattern=r"^DEMOS:"))
+    app.add_handler(CommandHandler("adddemo", adddemo))
+    app.add_handler(CommandHandler("removedemo", removedemo))
+    app.add_handler(CommandHandler("listdemos", listdemos))
 
     app.add_handler(conv)
 
