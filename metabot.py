@@ -468,9 +468,9 @@ async def create_lp_get_niche(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ----- Service Demos (replace with real links) -----
 SERVICE_DEMOS = {
     "Websites (Samples)": "https://metabulluniverse.com/",
-    "Websites (Samples)": "https://portfolio.metabulluniverse.com/",
-    "Websites (Samples)": "https://wamanhaus.com/",
-    "Websites (Samples)": "https://frescoclothing.shop/",
+    "Websites1 (Samples)": "https://portfolio.metabulluniverse.com/",
+    "Websites2 (Samples)": "https://wamanhaus.com/",
+    "Websites3 (Samples)": "https://frescoclothing.shop/",
     "Drive (Showreel)": "https://drive.google.com/",
     "Ads Portfolio": "https://example.com/ads",
     "YouTube Playlist": "https://youtube.com/",
